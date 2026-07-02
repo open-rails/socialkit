@@ -12,9 +12,13 @@ import (
 	"github.com/open-rails/migratekit"
 )
 
-// migratekitApp is the tracking key for socialkit's migrations (per-app row in
-// migratekit's ledger). Stable — do not change once shipped.
-const migratekitApp = "socialkit"
+// MigratekitApp is the migratekit tracker label for socialkit's migrations. A
+// host running a central migrate step applies socialkit.PostgresMigrations under
+// THIS label (+ WithSchema(hostSchema)) and passes Options.SkipMigrate, so the
+// runtime and the migrate step agree. One label is safe across hosts that share
+// a database with different schemas: migratekit v1.2.0+ folds the target schema
+// into its tracker identity, so doujins.* and hentai0.* track independently.
+const MigratekitApp = "socialkit"
 
 // Options configures a Runtime. Pool, Schema, Identity, Authz and Entities are
 // mandatory; the rest fall back to documented defaults.
@@ -132,7 +136,7 @@ func (rt *Runtime) migrate(ctx context.Context) error {
 	if _, err := db.ExecContext(ctx, "CREATE SCHEMA IF NOT EXISTS "+pgx.Identifier{rt.schema}.Sanitize()); err != nil {
 		return fmt.Errorf("socialkit: ensure schema: %w", err)
 	}
-	if err := migratekit.NewPostgres(db, migratekitApp).WithSchema(rt.schema).ApplyMigrations(ctx, migrations); err != nil {
+	if err := migratekit.NewPostgres(db, MigratekitApp).WithSchema(rt.schema).ApplyMigrations(ctx, migrations); err != nil {
 		return fmt.Errorf("socialkit: apply migrations: %w", err)
 	}
 	return nil
