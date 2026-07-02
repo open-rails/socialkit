@@ -83,6 +83,42 @@ func (p *posts) mount(mux *http.ServeMux) {
 	mux.HandleFunc("POST /posts/{id}/like", p.handleReact(1))
 	mux.HandleFunc("POST /posts/{id}/dislike", p.handleReact(-1))
 	mux.HandleFunc("POST /posts/{id}/neutral", p.handleReact(0))
+	mux.HandleFunc("POST /posts/{id}/cover", p.handleCover)
+}
+
+// handleCover uploads a post cover to socialkit's media store and stores the
+// resulting public URL on the post. PostWrite-gated.
+func (p *posts) handleCover(w http.ResponseWriter, req *http.Request) {
+	actor := p.rt.actor(req.Context())
+	if err := p.rt.requirePerm(req.Context(), actor, p.rt.perms.PostWrite); err != nil {
+		writeErr(w, err)
+		return
+	}
+	id := req.PathValue("id")
+	if !uuidRe.MatchString(id) {
+		writeErr(w, ErrNotFound)
+		return
+	}
+	data, ct, ext, err := readUpload(req)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	url, err := p.rt.media.Put(req.Context(), "posts/"+id+"/cover."+ext, data, ct)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	tag, err := p.s.pool.Exec(req.Context(), `UPDATE `+p.s.t.posts+` SET cover_url = $2, updated_at = now() WHERE id = $1 AND deleted_at IS NULL`, id, url)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		writeErr(w, ErrNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"cover_url": url})
 }
 
 func (p *posts) handleCreate(w http.ResponseWriter, req *http.Request) {

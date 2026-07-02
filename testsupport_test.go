@@ -126,6 +126,29 @@ func (f *fakeResolver) Resolve(_ context.Context, entityType, id string, _ Actor
 	return ref, nil
 }
 
+// fakeMedia is an in-memory MediaStore capturing uploads for assertions.
+type fakeMedia struct {
+	mu   sync.Mutex
+	puts map[string][]byte
+}
+
+func (f *fakeMedia) Put(_ context.Context, key string, data []byte, _ string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.puts == nil {
+		f.puts = map[string][]byte{}
+	}
+	f.puts[key] = data
+	return "https://cdn.test/" + key, nil
+}
+
+func (f *fakeMedia) stored(key string) ([]byte, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	d, ok := f.puts[key]
+	return d, ok
+}
+
 // recordingRecorder captures emitted signals for assertions.
 type recordingRecorder struct {
 	mu        sync.Mutex

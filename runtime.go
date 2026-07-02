@@ -37,8 +37,13 @@ type Options struct {
 	Users      UserEnricher     // default: no enrichment (ids only)
 	Moderation Moderation       // default: DefaultModeration
 	Recorder   Recorder         // default: no-op
-	Media      MediaStore       // default: unsupported (errors)
+	Media      MediaStore       // explicit override; usually leave nil and set Storage
 	Content    ContentProcessor // default: strip tags
+
+	// Storage configures socialkit's built-in S3-backed media store (poll/post
+	// image upload to a public bucket). When set and Media is nil, socialkit owns
+	// file upload itself. See StorageConfig.
+	Storage *StorageConfig
 
 	// Perms are the host-supplied, opaque permission strings gating privileged
 	// writes (see Perms). An unset perm on a privileged action fails closed.
@@ -90,6 +95,11 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 		return nil, fmt.Errorf("socialkit: Identity, Authz and Entities ports are required")
 	}
 
+	media, err := resolveMedia(opts)
+	if err != nil {
+		return nil, err
+	}
+
 	rt := &Runtime{
 		store:    newStore(opts.Pool, opts.Schema),
 		schema:   opts.Schema,
@@ -99,7 +109,7 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 		users:    orDefault[UserEnricher](opts.Users, noopEnricher{}),
 		mod:      orDefault[Moderation](opts.Moderation, &DefaultModeration{}),
 		rec:      orDefault[Recorder](opts.Recorder, noopRecorder{}),
-		media:    orDefault[MediaStore](opts.Media, unsupportedMediaStore{}),
+		media:    media,
 		content:  orDefault[ContentProcessor](opts.Content, stripProcessor{}),
 		perms:    opts.Perms,
 		types:    make(map[string]struct{}, len(opts.EntityTypes)),

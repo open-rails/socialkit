@@ -353,6 +353,42 @@ func (p *polls) mount(mux *http.ServeMux) {
 	mux.HandleFunc("PATCH /polls/{id}", p.handleUpdate)
 	mux.HandleFunc("DELETE /polls/{id}", p.handleDelete)
 	mux.HandleFunc("POST /polls/{id}/vote", p.handleVote)
+	mux.HandleFunc("POST /polls/options/{oid}/image", p.handleOptionImage)
+}
+
+// handleOptionImage uploads an option image to socialkit's media store and
+// stores the resulting public URL on the option. PollWrite-gated.
+func (p *polls) handleOptionImage(w http.ResponseWriter, req *http.Request) {
+	actor := p.rt.actor(req.Context())
+	if err := p.rt.requirePerm(req.Context(), actor, p.rt.perms.PollWrite); err != nil {
+		writeErr(w, err)
+		return
+	}
+	oid := req.PathValue("oid")
+	if !uuidRe.MatchString(oid) {
+		writeErr(w, ErrNotFound)
+		return
+	}
+	data, ct, ext, err := readUpload(req)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	url, err := p.rt.media.Put(req.Context(), "polls/options/"+oid+"."+ext, data, ct)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	tag, err := p.s.pool.Exec(req.Context(), `UPDATE `+p.s.t.pollOptions+` SET image_url = $2 WHERE id = $1`, oid, url)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		writeErr(w, ErrNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"image_url": url})
 }
 
 func (p *polls) handleList(w http.ResponseWriter, req *http.Request) {
