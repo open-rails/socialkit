@@ -33,35 +33,34 @@ CREATE INDEX social_reactions_entity_idx
     ON social_reactions (entity_type, entity_id);
 
 -- ----------------------------------------------------------------------------
--- Comments: threaded via a materialized path (dot-joined ids as text — no
--- ltree extension dependency, so the kit stays portable). SPLIT like/dislike
--- counters (not a net score) so a discovery layer can rank later with no
--- recount. Soft-delete keeps threads intact.
+-- Comments: YouTube-style two-level threading via an adjacency `parent_id`.
+-- Top-level comments carry a denormalized `reply_count`; replies are ONE level
+-- deep and fetched lazily per parent (no full-tree materialization). SPLIT
+-- like/dislike counters (not a net score) so a discovery layer can rank later
+-- with no recount. Soft-delete tombstones a row so a thread stays navigable.
 -- ----------------------------------------------------------------------------
 CREATE TABLE social_comments (
     id          uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
     entity_type text        NOT NULL,
     entity_id   text        NOT NULL,
     parent_id   uuid        REFERENCES social_comments (id) ON DELETE CASCADE,
-    path        text        NOT NULL DEFAULT '',   -- ancestor ids, '.'-joined; excludes self
-    depth       int         NOT NULL DEFAULT 0,
     user_id     text,
     anon_name   text,
     body        text        NOT NULL,
     likes       int         NOT NULL DEFAULT 0,
     dislikes    int         NOT NULL DEFAULT 0,
-    reply_count int         NOT NULL DEFAULT 0,
+    reply_count int         NOT NULL DEFAULT 0,   -- top-level only; replies are one level deep
     deleted_at  timestamptz,
     created_at  timestamptz NOT NULL DEFAULT now(),
     updated_at  timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT social_comments_actor_ck CHECK (user_id IS NOT NULL OR anon_name IS NOT NULL)
 );
-CREATE INDEX social_comments_entity_idx
-    ON social_comments (entity_type, entity_id, created_at DESC);
-CREATE INDEX social_comments_path_idx
-    ON social_comments (entity_type, entity_id, path text_pattern_ops);
+-- Top-level list per entity, newest-first.
+CREATE INDEX social_comments_toplevel_idx
+    ON social_comments (entity_type, entity_id, created_at DESC) WHERE parent_id IS NULL;
+-- A parent's replies, oldest-first (lazy reply fetch).
 CREATE INDEX social_comments_parent_idx
-    ON social_comments (parent_id) WHERE parent_id IS NOT NULL;
+    ON social_comments (parent_id, created_at) WHERE parent_id IS NOT NULL;
 
 -- ----------------------------------------------------------------------------
 -- Polls: site-wide questions with options; anon-capable voting, one vote per

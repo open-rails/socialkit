@@ -12,10 +12,11 @@ import (
 )
 
 // comments is the threaded comment module over the polymorphic (entity_type,
-// entity_id) key. Threading is a materialized path (dot-joined ancestor ids, no
-// ltree dependency); counters are SPLIT (likes/dislikes) denormalized on the row
-// and bumped via the shared reactions.applyTx primitive so the counter logic
-// lives in one place. Soft-delete tombstones a row so replies still thread.
+// entity_id) key. Threading is YouTube-style: a list returns TOP-LEVEL comments
+// with a reply_count, and replies (one level deep) are fetched lazily per parent
+// — no full-tree materialization. SPLIT like/dislike counters live on the row
+// and are bumped via the shared reactions.applyTx primitive. Soft-delete
+// tombstones a row so a thread stays navigable.
 type comments struct {
 	rt *Runtime
 	s  *store
@@ -24,10 +25,6 @@ type comments struct {
 func newComments(rt *Runtime) *comments {
 	return &comments{rt: rt, s: rt.store}
 }
-
-// maxCommentDepth caps how deep a reply may nest; a reply computing a greater
-// depth is rejected. Root = depth 0.
-const maxCommentDepth = 6
 
 // commentTombstone is the body shown for a soft-deleted comment.
 const commentTombstone = "[deleted]"
@@ -52,7 +49,6 @@ type editInput struct {
 type Comment struct {
 	ID         string      `json:"id"`
 	ParentID   string      `json:"parent_id,omitempty"`
-	Depth      int         `json:"depth"`
 	UserID     string      `json:"user_id,omitempty"`
 	AnonName   string      `json:"anon_name,omitempty"`
 	Body       string      `json:"body"`
@@ -66,9 +62,10 @@ type Comment struct {
 	UpdatedAt  time.Time   `json:"updated_at"`
 }
 
-// create gates on accessibility, moderates + sanitizes the body, resolves
-// threading against the parent, and inserts the comment while bumping the
-// parent's reply_count in the same tx.
+// create gates on accessibility, moderates + sanitizes the body, and inserts.
+// A reply (parent_id set) must target a TOP-LEVEL comment on the SAME entity;
+// replies are one level deep (a reply-to-a-reply re-parents to the top-level on
+// the client, e.g. via an @mention). The parent's reply_count is bumped in tx.
 func (c *comments) create(ctx context.Context, actor Actor, entityType, entityID string, in createInput) (Comment, error) {
 	if _, err := c.rt.gate(ctx, entityType, entityID, actor, true); err != nil {
 		return Comment{}, err
@@ -109,41 +106,38 @@ func (c *comments) create(ctx context.Context, actor Actor, entityType, entityID
 	defer tx.Rollback(ctx)
 
 	var parentArg any
-	path, depth := "", 0
 	if in.ParentID != "" {
 		if !uuidRe.MatchString(in.ParentID) {
 			return Comment{}, badRequest("invalid parent_id")
 		}
-		var pType, pID, pPath string
-		var pDepth int
+		var pType, pID string
+		var pParent *string
 		var pDeleted *time.Time
-		row := tx.QueryRow(ctx, `SELECT entity_type, entity_id, path, depth, deleted_at FROM `+c.s.t.comments+` WHERE id = $1`, in.ParentID)
-		if err := row.Scan(&pType, &pID, &pPath, &pDepth, &pDeleted); err != nil {
+		row := tx.QueryRow(ctx, `SELECT entity_type, entity_id, parent_id::text, deleted_at FROM `+c.s.t.comments+` WHERE id = $1`, in.ParentID)
+		if err := row.Scan(&pType, &pID, &pParent, &pDeleted); err != nil {
 			if errors.Is(err, pgx.ErrNoRows) {
 				return Comment{}, badRequest("parent comment not found")
 			}
 			return Comment{}, err
 		}
-		if pType != entityType || pID != entityID { // exactly-one-target: parent shares the entity
+		if pType != entityType || pID != entityID { // exactly-one-target
 			return Comment{}, badRequest("parent belongs to a different entity")
 		}
 		if pDeleted != nil {
 			return Comment{}, badRequest("cannot reply to a deleted comment")
 		}
-		depth = pDepth + 1
-		if depth > maxCommentDepth {
-			return Comment{}, badRequest("maximum thread depth exceeded")
+		if pParent != nil { // single-level: replies attach to a top-level comment
+			return Comment{}, badRequest("cannot reply to a reply")
 		}
-		path = pPath + in.ParentID + "." // ancestor ids '.'-joined, excludes self
 		parentArg = in.ParentID
 	}
 
-	out := Comment{Depth: depth, ParentID: in.ParentID, Body: clean}
+	out := Comment{ParentID: in.ParentID, Body: clean}
 	row := tx.QueryRow(ctx, `INSERT INTO `+c.s.t.comments+`
-		(entity_type, entity_id, parent_id, path, depth, user_id, anon_name, body)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+		(entity_type, entity_id, parent_id, user_id, anon_name, body)
+		VALUES ($1,$2,$3,$4,$5,$6)
 		RETURNING id::text, created_at, updated_at`,
-		entityType, entityID, parentArg, path, depth, userID, anonName, clean)
+		entityType, entityID, parentArg, userID, anonName, clean)
 	if err := row.Scan(&out.ID, &out.CreatedAt, &out.UpdatedAt); err != nil {
 		return Comment{}, err
 	}
@@ -164,38 +158,68 @@ func (c *comments) create(ctx context.Context, actor Actor, entityType, entityID
 	return out, nil
 }
 
-// list returns the entity's comments thread-ordered (ORDER BY path, created_at),
-// tombstoning soft-deleted rows so replies still show, with authors and the
-// caller's own reaction batch-attached.
-func (c *comments) list(ctx context.Context, actor Actor, entityType, entityID string) ([]Comment, error) {
+// list returns the entity's TOP-LEVEL comments, newest-first and paginated, each
+// with reply_count so the client can lazily fetch replies. Requires the entity
+// be visible (not accessible — reading is allowed on premium-locked targets).
+func (c *comments) list(ctx context.Context, actor Actor, entityType, entityID string, limit, offset int) ([]Comment, error) {
 	if _, err := c.rt.gate(ctx, entityType, entityID, actor, false); err != nil {
 		return nil, err
 	}
-	// Order by the SELF-INCLUSIVE path (stored path excludes self) so each parent
-	// sorts immediately before its descendants; plain `path` would group all
-	// roots first, then all replies, breaking thread display.
-	rows, err := c.s.pool.Query(ctx, `SELECT id::text, parent_id::text, depth, user_id, anon_name, body, likes, dislikes, reply_count, deleted_at, created_at, updated_at
+	rows, err := c.s.pool.Query(ctx, `SELECT id::text, parent_id::text, user_id, anon_name, body, likes, dislikes, reply_count, deleted_at, created_at, updated_at
 		FROM `+c.s.t.comments+`
-		WHERE entity_type = $1 AND entity_id = $2
-		ORDER BY (path || id::text), created_at`, entityType, entityID)
+		WHERE entity_type = $1 AND entity_id = $2 AND parent_id IS NULL
+		ORDER BY created_at DESC
+		LIMIT $3 OFFSET $4`, entityType, entityID, limit, offset)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	return c.hydrate(ctx, actor, rows)
+}
 
+// replies returns a parent comment's direct replies, oldest-first + paginated.
+// Gated on the parent's entity visibility.
+func (c *comments) replies(ctx context.Context, actor Actor, parentID string, limit, offset int) ([]Comment, error) {
+	if !uuidRe.MatchString(parentID) {
+		return nil, ErrNotFound
+	}
+	var entityType, entityID string
+	if err := c.s.pool.QueryRow(ctx, `SELECT entity_type, entity_id FROM `+c.s.t.comments+` WHERE id = $1`, parentID).Scan(&entityType, &entityID); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrNotFound
+		}
+		return nil, err
+	}
+	if _, err := c.rt.gate(ctx, entityType, entityID, actor, false); err != nil {
+		return nil, err
+	}
+	rows, err := c.s.pool.Query(ctx, `SELECT id::text, parent_id::text, user_id, anon_name, body, likes, dislikes, reply_count, deleted_at, created_at, updated_at
+		FROM `+c.s.t.comments+`
+		WHERE parent_id = $1
+		ORDER BY created_at ASC
+		LIMIT $2 OFFSET $3`, parentID, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	return c.hydrate(ctx, actor, rows)
+}
+
+// hydrate scans comment rows (tombstoning soft-deleted ones), then batch-attaches
+// authors + the caller's own reaction.
+func (c *comments) hydrate(ctx context.Context, actor Actor, rows pgx.Rows) ([]Comment, error) {
+	defer rows.Close()
 	var out []Comment
 	var authorIDs []string
 	for rows.Next() {
 		var cm Comment
 		var parentID, userID, anonName *string
 		var deletedAt *time.Time
-		if err := rows.Scan(&cm.ID, &parentID, &cm.Depth, &userID, &anonName, &cm.Body, &cm.Likes, &cm.Dislikes, &cm.ReplyCount, &deletedAt, &cm.CreatedAt, &cm.UpdatedAt); err != nil {
+		if err := rows.Scan(&cm.ID, &parentID, &userID, &anonName, &cm.Body, &cm.Likes, &cm.Dislikes, &cm.ReplyCount, &deletedAt, &cm.CreatedAt, &cm.UpdatedAt); err != nil {
 			return nil, err
 		}
 		if parentID != nil {
 			cm.ParentID = *parentID
 		}
-		if deletedAt != nil { // tombstone: keep the row for thread integrity, hide content + author
+		if deletedAt != nil { // tombstone: keep the row, hide content + author
 			cm.Deleted = true
 			cm.Body = commentTombstone
 		} else {
@@ -212,7 +236,6 @@ func (c *comments) list(ctx context.Context, actor Actor, entityType, entityID s
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-
 	if err := c.enrichAuthors(ctx, out, authorIDs); err != nil {
 		return nil, err
 	}
@@ -306,8 +329,8 @@ func (c *comments) edit(ctx context.Context, actor Actor, cid, rawBody string) (
 	row := c.s.pool.QueryRow(ctx, `UPDATE `+c.s.t.comments+`
 		SET body = $2, updated_at = now()
 		WHERE id = $1 AND deleted_at IS NULL
-		RETURNING id::text, parent_id::text, depth, user_id, anon_name, body, likes, dislikes, reply_count, created_at, updated_at`, cid, clean)
-	if err := row.Scan(&cm.ID, &parentID, &cm.Depth, &userID, &anonName, &cm.Body, &cm.Likes, &cm.Dislikes, &cm.ReplyCount, &cm.CreatedAt, &cm.UpdatedAt); err != nil {
+		RETURNING id::text, parent_id::text, user_id, anon_name, body, likes, dislikes, reply_count, created_at, updated_at`, cid, clean)
+	if err := row.Scan(&cm.ID, &parentID, &userID, &anonName, &cm.Body, &cm.Likes, &cm.Dislikes, &cm.ReplyCount, &cm.CreatedAt, &cm.UpdatedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return Comment{}, ErrNotFound
 		}
@@ -407,6 +430,7 @@ func (c *comments) reactTx(ctx context.Context, actor Actor, cid string, value i
 func (c *comments) mount(mux *http.ServeMux) {
 	mux.HandleFunc("GET /{type}/{id}/comments", c.handleList)
 	mux.HandleFunc("POST /{type}/{id}/comments", c.handleCreate)
+	mux.HandleFunc("GET /comments/{cid}/replies", c.handleReplies)
 	mux.HandleFunc("PATCH /comments/{cid}", c.handleEdit)
 	mux.HandleFunc("DELETE /comments/{cid}", c.handleDelete)
 	mux.HandleFunc("POST /comments/{cid}/like", c.handleReact(1))
@@ -416,7 +440,19 @@ func (c *comments) mount(mux *http.ServeMux) {
 
 func (c *comments) handleList(w http.ResponseWriter, req *http.Request) {
 	actor := c.rt.actor(req.Context())
-	list, err := c.list(req.Context(), actor, req.PathValue("type"), req.PathValue("id"))
+	limit, offset := parsePage(req)
+	list, err := c.list(req.Context(), actor, req.PathValue("type"), req.PathValue("id"), limit, offset)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, list)
+}
+
+func (c *comments) handleReplies(w http.ResponseWriter, req *http.Request) {
+	actor := c.rt.actor(req.Context())
+	limit, offset := parsePage(req)
+	list, err := c.replies(req.Context(), actor, req.PathValue("cid"), limit, offset)
 	if err != nil {
 		writeErr(w, err)
 		return

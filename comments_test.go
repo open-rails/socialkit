@@ -3,7 +3,6 @@ package socialkit
 import (
 	"context"
 	"errors"
-	"fmt"
 	"sync"
 	"testing"
 )
@@ -41,7 +40,7 @@ func mustComment(t *testing.T, rt *Runtime, actor Actor, entityType, id string, 
 	return cm
 }
 
-func TestComments_ThreadingReplyCountAndOrder(t *testing.T) {
+func TestComments_TopLevelRepliesAndReplyCount(t *testing.T) {
 	rt := commentsRuntime(t, Options{Users: commentsEnricher{}})
 	ctx := context.Background()
 	author := Actor{ID: "author"}
@@ -50,35 +49,43 @@ func TestComments_ThreadingReplyCountAndOrder(t *testing.T) {
 	r := mustComment(t, rt, author, "gallery", "1", createInput{Body: "reply to A", ParentID: a.ID})
 	_ = mustComment(t, rt, author, "gallery", "1", createInput{Body: "root B"})
 
-	if a.Depth != 0 || r.Depth != 1 {
-		t.Fatalf("depths: root=%d reply=%d, want 0 and 1", a.Depth, r.Depth)
-	}
 	if r.ParentID != a.ID {
 		t.Fatalf("reply parent = %q, want %q", r.ParentID, a.ID)
 	}
 
-	list, err := rt.comments.list(ctx, author, "gallery", "1")
+	// List returns TOP-LEVEL comments only, newest-first, with reply_count.
+	top, err := rt.comments.list(ctx, author, "gallery", "1", 10, 0)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
-	if len(list) != 3 {
-		t.Fatalf("list len = %d, want 3", len(list))
+	if len(top) != 2 {
+		t.Fatalf("top-level count = %d, want 2 (reply excluded)", len(top))
 	}
-	// The reply must immediately follow its parent (thread grouping).
-	ai := indexOfComment(list, a.ID)
-	if ai < 0 || ai+1 >= len(list) || list[ai+1].ID != r.ID {
-		t.Fatalf("reply does not immediately follow parent: %+v", commentIDs(list))
+	if indexOfComment(top, r.ID) >= 0 {
+		t.Fatal("a reply leaked into the top-level list")
 	}
-	// Parent's reply_count was bumped, and the author was enriched.
-	if list[ai].ReplyCount != 1 {
-		t.Fatalf("parent reply_count = %d, want 1", list[ai].ReplyCount)
+	ai := indexOfComment(top, a.ID)
+	if ai < 0 {
+		t.Fatal("root A missing from top-level list")
 	}
-	if list[ai].Author == nil || list[ai].Author.Username != "name-author" {
-		t.Fatalf("author not enriched: %+v", list[ai].Author)
+	if top[ai].ReplyCount != 1 {
+		t.Fatalf("A.reply_count = %d, want 1", top[ai].ReplyCount)
+	}
+	if top[ai].Author == nil || top[ai].Author.Username != "name-author" {
+		t.Fatalf("author not enriched: %+v", top[ai].Author)
+	}
+
+	// Replies are fetched lazily per parent.
+	reps, err := rt.comments.replies(ctx, author, a.ID, 10, 0)
+	if err != nil {
+		t.Fatalf("replies: %v", err)
+	}
+	if len(reps) != 1 || reps[0].ID != r.ID || reps[0].ParentID != a.ID {
+		t.Fatalf("replies = %+v, want [reply %s]", commentIDs(reps), r.ID)
 	}
 }
 
-func TestComments_ExactlyOneTargetAndDepthCap(t *testing.T) {
+func TestComments_ReplyConstraints(t *testing.T) {
 	res := &fakeResolver{}
 	res.set("gallery", "1", true, true)
 	res.set("gallery", "2", true, true)
@@ -91,18 +98,10 @@ func TestComments_ExactlyOneTargetAndDepthCap(t *testing.T) {
 	if _, err := rt.comments.create(ctx, author, "gallery", "2", createInput{Body: "cross", ParentID: onE1.ID}); err == nil {
 		t.Fatal("expected rejection: parent belongs to a different entity")
 	}
-
-	// Nest to the depth cap; the level beyond it is rejected.
-	parent := onE1
-	for d := 1; d <= maxCommentDepth; d++ {
-		child, err := rt.comments.create(ctx, author, "gallery", "1", createInput{Body: fmt.Sprintf("d%d", d), ParentID: parent.ID})
-		if err != nil {
-			t.Fatalf("reply at depth %d rejected early: %v", d, err)
-		}
-		parent = child
-	}
-	if _, err := rt.comments.create(ctx, author, "gallery", "1", createInput{Body: "too deep", ParentID: parent.ID}); err == nil {
-		t.Fatalf("expected depth-cap rejection beyond depth %d", maxCommentDepth)
+	// Single-level: replying to a reply is rejected.
+	reply := mustComment(t, rt, author, "gallery", "1", createInput{Body: "reply", ParentID: onE1.ID})
+	if _, err := rt.comments.create(ctx, author, "gallery", "1", createInput{Body: "nested", ParentID: reply.ID}); err == nil {
+		t.Fatal("expected rejection: cannot reply to a reply")
 	}
 }
 
@@ -154,18 +153,22 @@ func TestComments_SoftDeleteKeepsThread(t *testing.T) {
 	if err := rt.comments.softDelete(ctx, author, parent.ID); err != nil {
 		t.Fatalf("soft delete: %v", err)
 	}
-	list, err := rt.comments.list(ctx, author, "gallery", "1")
+	top, err := rt.comments.list(ctx, author, "gallery", "1", 10, 0)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
-	if len(list) != 2 {
-		t.Fatalf("list len = %d, want 2 (tombstone kept)", len(list))
+	if len(top) != 1 {
+		t.Fatalf("top-level count = %d, want 1 (tombstone kept)", len(top))
 	}
-	pi := indexOfComment(list, parent.ID)
-	if !list[pi].Deleted || list[pi].Body != commentTombstone {
-		t.Fatalf("parent not tombstoned: %+v", list[pi])
+	if !top[0].Deleted || top[0].Body != commentTombstone {
+		t.Fatalf("parent not tombstoned: %+v", top[0])
 	}
-	if indexOfComment(list, reply.ID) < 0 {
+	// The reply is still reachable under the tombstoned parent.
+	reps, err := rt.comments.replies(ctx, author, parent.ID, 10, 0)
+	if err != nil {
+		t.Fatalf("replies: %v", err)
+	}
+	if indexOfComment(reps, reply.ID) < 0 {
 		t.Fatal("reply disappeared after parent soft-delete")
 	}
 }
@@ -215,25 +218,25 @@ func TestComments_ReactionCountersExact(t *testing.T) {
 	}
 	wg.Wait()
 
-	list, err := rt.comments.list(ctx, reactor, "gallery", "1")
+	top, err := rt.comments.list(ctx, reactor, "gallery", "1", 10, 0)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
-	i := indexOfComment(list, cm.ID)
-	if list[i].Likes != 1 || list[i].Dislikes != 0 {
-		t.Fatalf("comment counters = likes %d dislikes %d, want 1/0", list[i].Likes, list[i].Dislikes)
+	i := indexOfComment(top, cm.ID)
+	if top[i].Likes != 1 || top[i].Dislikes != 0 {
+		t.Fatalf("comment counters = likes %d dislikes %d, want 1/0", top[i].Likes, top[i].Dislikes)
 	}
-	if list[i].Mine != 1 {
-		t.Fatalf("caller's own reaction = %d, want 1", list[i].Mine)
+	if top[i].Mine != 1 {
+		t.Fatalf("caller's own reaction = %d, want 1", top[i].Mine)
 	}
 	// Switch to dislike: split counters move, no double count.
 	if _, err := rt.comments.reactTx(ctx, reactor, cm.ID, -1); err != nil {
 		t.Fatalf("switch reaction: %v", err)
 	}
-	list, _ = rt.comments.list(ctx, reactor, "gallery", "1")
-	i = indexOfComment(list, cm.ID)
-	if list[i].Likes != 0 || list[i].Dislikes != 1 {
-		t.Fatalf("after switch: likes %d dislikes %d, want 0/1", list[i].Likes, list[i].Dislikes)
+	top, _ = rt.comments.list(ctx, reactor, "gallery", "1", 10, 0)
+	i = indexOfComment(top, cm.ID)
+	if top[i].Likes != 0 || top[i].Dislikes != 1 {
+		t.Fatalf("after switch: likes %d dislikes %d, want 0/1", top[i].Likes, top[i].Dislikes)
 	}
 }
 
