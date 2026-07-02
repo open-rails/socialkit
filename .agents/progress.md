@@ -4,7 +4,7 @@
 > IDs are stable for an issue's lifecycle; new issues take `next_id` and bump it.
 > Tick tasks `- [x]` as they're completed; set an issue's `Completed:` to yes when all tasks done + acceptance met.
 
-next_id: 19
+next_id: 20
 
 ## What socialkit is
 
@@ -386,3 +386,21 @@ The gallery (doujins) / video (hentai0) reaction is the most host-coupled: denor
 - [ ] Backfill + cutover + drop the old per-content reaction tables/columns in both apps.
 
 Acceptance: all reactions (incl. primary content) run through socialkit; no bespoke per-content reaction paths remain.
+
+---
+
+# #19: Adapt doujins `migrate legacy` to write into socialkit tables
+
+**Completed:** no
+Status: TODO (investigate first) — blocks/pairs with #10 per-system cutovers.
+
+doujins has a `migrate legacy ...` command (`internal/legacy_migrate/`) that imports the legacy MySQL data (doujins_en / pro_hentai_common) into the doujins Postgres. Its engagement handlers (`internal/legacy_migrate/handlers/user_engagement.go` and friends) currently write into the OLD tables: `comments`, `comment_reactions` / `blog_post_reactions` / `user_entity_reactions`, `gallery_favorites`, `poll_*`, `blog_posts`. Once socialkit owns those, the importer must write into `social_*` instead — **using the SAME opaque-item mapping each system's cutover settles** (e.g. gallery comments/reactions/favorites key on the doujins-chosen id, blog on blog_post_id, etc.). This is separate from the one-time backfill of already-migrated prod rows: the importer is an ongoing/re-runnable process, so it must target `social_*` going forward or re-runs will repopulate dead tables.
+
+**Tasks:**
+- [ ] Inventory every `legacy_migrate` handler + engine that touches comments / reactions / favorites / polls / blog (grep the engine registry + `handlers/`), and the exact old-table writes + id shapes each uses (esp. how it currently derives `gallery_i18n_id` / `blog_post_id` / gallery id).
+- [ ] Decide re-target vs shim: adapt each handler to INSERT into the matching `social_*` table via socialkit's opaque `(entity_type, entity_id)` (reusing the doujins adapter's id-mapping so importer + live writes agree), OR route the importer through socialkit's Go/HTTP path.
+- [ ] Reconcile with the per-system backfill (#10): backfill existing rows + re-point the importer in the SAME cutover so there's one source of truth, no drift.
+- [ ] Verify: a `migrate legacy --new-only` re-run populates `social_*` (not the dropped/old tables) and is idempotent; check the migration_* observability tables still report progress.
+- [ ] Coordinate ordering: the importer change must land with (not before) each system's table drop, else a re-run recreates/writes a dropped table.
+
+Acceptance: `doujins migrate legacy` imports comments/reactions/favorites/polls/blog into `social_*` with the correct per-system entity_id mapping; no writes to the retired tables; idempotent re-runs; done per-system alongside #10.
