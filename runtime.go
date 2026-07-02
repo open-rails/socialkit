@@ -67,6 +67,10 @@ type Runtime struct {
 	types    map[string]struct{}
 
 	reactions *reactions
+	polls     *polls
+	comments  *comments
+	posts     *posts
+	favorites *favorites
 }
 
 // New constructs a Runtime, self-migrates socialkit's schema (unless
@@ -106,7 +110,12 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 		}
 	}
 
+	// reactions first — comments and posts reuse its applyTx primitive.
 	rt.reactions = newReactions(rt)
+	rt.polls = newPolls(rt)
+	rt.comments = newComments(rt)
+	rt.posts = newPosts(rt)
+	rt.favorites = newFavorites(rt)
 	return rt, nil
 }
 
@@ -135,6 +144,10 @@ func (rt *Runtime) migrate(ctx context.Context) error {
 func (rt *Runtime) Handler() http.Handler {
 	mux := http.NewServeMux()
 	rt.reactions.mount(mux)
+	rt.polls.mount(mux)
+	rt.comments.mount(mux)
+	rt.posts.mount(mux)
+	rt.favorites.mount(mux)
 	return mux
 }
 

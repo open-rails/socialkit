@@ -204,8 +204,8 @@ Acceptance: reactions on any registered entity type; blocked on inaccessible tar
 
 # #6: Polls system
 
-**Completed:** no
-Status: PLANNED
+**Completed:** yes
+Status: DONE — `polls.go`. Admin CRUD gated by `PollWrite`; public list (by language) + get + vote. Anon-by-IP, dup-guard via partial-unique + `INSERT ... ON CONFLICT DO NOTHING` (increment `vote_count` only when RowsAffected==1). Integration-tested incl. concurrent duplicate-vote exactness, per-language slicing, admin gate.
 
 Standalone site-wide polls (doujins-only today → hentai0 gains it free). Lowest coupling.
 
@@ -221,8 +221,8 @@ Acceptance: full poll lifecycle (create → vote → tally) works; no double-cou
 
 # #7: Comments system
 
-**Completed:** no
-Status: PLANNED
+**Completed:** yes
+Status: DONE — `comments.go`. Materialized-path threading (dot-joined ancestor ids, depth-capped at 6), SPLIT counters via shared `reactions.applyTx`, soft-delete tombstones. Create gates ACCESSIBLE + moderates + sanitizes; list gates VISIBLE, batch-enriches authors + attaches caller's reaction. Thread ordering: `ORDER BY (path || id)` so a parent immediately precedes its subtree (plain `path` grouped all roots first — fixed). Known v1 limitation: siblings sort by id, not strictly chronological (host has parent_id+created_at+depth to re-sort). Integration-tested: threading/reply_count/order, exactly-one-target, depth cap, gating, moderation, soft-delete-keeps-thread, owner-vs-moderator delete, concurrent reaction exactness.
 
 Threaded comments keyed on the polymorphic entity; the biggest rewrite for hentai0 (it has no comment service today).
 
@@ -239,8 +239,8 @@ Acceptance: comment CRUD + threaded feed on any registered entity; commenting on
 
 # #8: Posts (blog) system
 
-**Completed:** no
-Status: PLANNED
+**Completed:** yes
+Status: DONE — `posts.go`. CRUD gated by `PostWrite` (fail-closed — an authz error is 403, verified); sanitize on write; published-only list (sorted, paginated, comment_count computed) + drafts visible only to permission holders; post like/dislike via shared `reactions.applyTx` bumping `total_likes/total_dislikes`; emits `Recorder.Post` for searchkit indexing. This also satisfies #4's denied-Can→403 acceptance.
 
 The generic `social_posts` primitive — authored content, write-gated by an authkit permission. Kit owns store + CRUD + simple list/get; **discovery (grouping/ordering/topics/feeds) is searchkit** over posts indexed via the Recorder signal. Host keeps routing/theming.
 
@@ -273,8 +273,8 @@ Acceptance: a host with zero moderation config still gets link-block + dup-rejec
 
 # #18: Favorites system
 
-**Completed:** no
-Status: PLANNED
+**Completed:** yes
+Status: DONE — `favorites.go`. User-only bookmark; add gates VISIBLE-only (wishlist premium-you-don't-own — the key distinction from reactions); idempotent add/remove; batch `IsFavorited`/`Count`/`CountsByEntity` (no denorm column imposed); emits `Recorder.Reaction` kind favorite/unfavorite. Integration-tested incl. the wishlist-a-locked-entity case and anon-rejection.
 
 Extraction confirmed (favorites eval): both apps have near-identical favorites — per-entity FK, user-only, plain bookmark, ZERO entitlement coupling (favoriting premium-you-don't-own is a wishlist, works today). Separate table from reactions; emitted as a reaction-KIND signal to searchkit.
 
