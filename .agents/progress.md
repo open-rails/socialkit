@@ -114,8 +114,8 @@ The **design principles** that govern HOW we build (polymorphic subject/actor, s
 
 # #1: Scaffold the module
 
-**Completed:** no
-Status: PLANNED
+**Completed:** yes
+Status: DONE — flat root package `socialkit` (avoids the ports<->impl import cycle a `social/`+`internal/` split would force); module `github.com/open-rails/socialkit`, go 1.26.4.
 
 Foundation: an empty, building Go module with the agreed layout + this design recorded.
 
@@ -131,8 +131,8 @@ Acceptance: `go build ./...` passes on an otherwise-empty module with the layout
 
 # #2: Host-provider ports + shared types
 
-**Completed:** no
-Status: PLANNED
+**Completed:** yes
+Status: DONE — `ports.go` (Identity/Authorizer/EntityResolver mandatory; UserEnricher/Moderation/Recorder/MediaStore/ContentProcessor optional w/ defaults). In-memory fakes in `testsupport_test.go`.
 
 The whole host boundary — the interfaces each app implements. Kit code depends only on these, never on host tables.
 
@@ -150,8 +150,8 @@ Acceptance: ports compile with godoc on each; a trivial in-memory fake implement
 
 # #3: schema (tables in the host schema) + migratekit migrations
 
-**Completed:** no
-Status: PLANNED
+**Completed:** yes
+Status: DONE — `migrations/postgres/001_social_core.up.sql` (all tables in one migration), applied via migratekit `WithSchema(host)`. Comment threading uses a dot-joined **text** path (no ltree extension dep — portability). Verified idempotent on a testcontainer.
 
 The kit-owned schema; polymorphic key throughout; counters kit-maintained.
 
@@ -170,8 +170,8 @@ Acceptance: migrations apply cleanly on a fresh Postgres (testcontainer) and are
 
 # #4: Embed runtime + route mounting + entity registration
 
-**Completed:** no
-Status: PLANNED
+**Completed:** yes
+Status: DONE — `runtime.go`: `New(ctx, Options)` self-migrates (idempotent, `SkipMigrate` escape hatch) + ensures the host schema exists; `Handler()` returns a stdlib `*http.ServeMux`; shared `gate()`/`requirePerm()` (fail-closed)/`actor()` helpers. Denied-Can → 403 asserted in the posts tests (#8).
 
 Wire the kit into a host, mirroring the openrails embed surface.
 
@@ -187,8 +187,8 @@ Acceptance: a test host can embed the runtime, mount routes, and serve a health/
 
 # #5: Reactions system
 
-**Completed:** no
-Status: PLANNED
+**Completed:** yes
+Status: DONE — `reactions.go`. 3-state upsert via SELECT FOR UPDATE + `INSERT ... ON CONFLICT DO NOTHING` (a bare INSERT's 23505 aborts the tx/25P02 — the losing racer must block+no-op instead). `applyTx` is the shared in-tx primitive comments/posts reuse to bump their SPLIT counter. Counts-on-read for generic entities. Integration-tested: transitions, concurrent double-like exactness, gating (locked/hidden/missing), anon-by-IP, recorder signal, HTTP route.
 
 Generic reactions over the polymorphic key — the most-duplicated, cleanest-to-extract system. Build first.
 
@@ -258,8 +258,8 @@ Acceptance: post CRUD + simple list/get via the kit; writes permission-gated; po
 
 # #9: Default moderation policy
 
-**Completed:** no
-Status: PLANNED
+**Completed:** yes
+Status: DONE — `moderation.go` `DefaultModeration`: link block (overridable), duplicate-submission reject (in-memory TTL, one mutex — host swaps in Redis-backed for multi-replica), tiny censor set. Each rule individually overridable. Unit-tested (no container).
 
 Ship a sane `Moderation` default so hosts get protection without wiring (doujins #722 reduced this to hardcoded rules — ideal library default).
 

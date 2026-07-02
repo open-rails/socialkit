@@ -1,0 +1,6 @@
+# build / test artifacts
+/dist/
+*.out
+*.test
+coverage.txt
+.DS_Store
