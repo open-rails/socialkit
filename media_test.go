@@ -90,6 +90,21 @@ func TestMedia_PostCoverUpload(t *testing.T) {
 	}
 }
 
+func TestMedia_PostInlineUpload(t *testing.T) {
+	media := &fakeMedia{}
+	rt, _ := newTestRuntime(t, Options{Authz: allowAll{}, Perms: Perms{PostWrite: "root:post:update"}, Media: media})
+	req := multipartUpload(t, "POST", "/posts/media", []byte("INLINE-IMG"))
+	req = req.WithContext(withActor(req.Context(), Actor{ID: "admin"}))
+	rec := httptest.NewRecorder()
+	rt.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+	}
+	if media.count() != 1 {
+		t.Fatalf("expected 1 stored inline image, got %d", media.count())
+	}
+}
+
 func TestMedia_UploadRequiresPerm(t *testing.T) {
 	rt, _ := newTestRuntime(t, Options{Authz: denyAll{}, Perms: Perms{PostWrite: "root:post:update"}, Media: &fakeMedia{}})
 	id := insertPost(t, rt)

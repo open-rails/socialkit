@@ -349,13 +349,36 @@ func (c *comments) edit(ctx context.Context, actor Actor, cid, rawBody string) (
 }
 
 // softDelete tombstones a comment (keeps the row for thread integrity). Allowed
-// for the owner or a moderator (CommentModerate).
+// for the owner or a moderator (CommentModerate). Decrements the parent's
+// reply_count when a reply is deleted so the count never drifts high.
 func (c *comments) softDelete(ctx context.Context, actor Actor, cid string) error {
 	if _, err := c.loadForWrite(ctx, actor, cid); err != nil {
 		return err
 	}
-	_, err := c.s.pool.Exec(ctx, `UPDATE `+c.s.t.comments+` SET deleted_at = now(), updated_at = now() WHERE id = $1 AND deleted_at IS NULL`, cid)
-	return err
+	tx, err := c.s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	var parentID *string
+	err = tx.QueryRow(ctx, `UPDATE `+c.s.t.comments+`
+		SET deleted_at = now(), updated_at = now()
+		WHERE id = $1 AND deleted_at IS NULL
+		RETURNING parent_id::text`, cid).Scan(&parentID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil // already deleted; nothing to do
+	}
+	if err != nil {
+		return err
+	}
+	if parentID != nil {
+		if _, err := tx.Exec(ctx, `UPDATE `+c.s.t.comments+`
+			SET reply_count = GREATEST(reply_count - 1, 0), updated_at = now() WHERE id = $1`, *parentID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit(ctx)
 }
 
 // loadForWrite resolves a live comment and authorizes actor as owner-or-moderator.

@@ -4,7 +4,7 @@
 > IDs are stable for an issue's lifecycle; new issues take `next_id` and bump it.
 > Tick tasks `- [x]` as they're completed; set an issue's `Completed:` to yes when all tasks done + acceptance met.
 
-next_id: 20
+next_id: 21
 
 ## What socialkit is
 
@@ -410,3 +410,45 @@ BOTH apps have a `migrate legacy` importer that pulls legacy MySQL data into Pos
 - [ ] Order it so the importer change lands WITH (not before) each system's table drop, else a re-run recreates a dropped table.
 
 Acceptance: both importers write comments/reactions/favorites/polls/blog into `social_*` with the correct per-system, per-schema entity_id mapping; no writes to retired tables; idempotent re-runs; landed per-system alongside #10/#11.
+
+---
+
+# #20: Per-entity aggregate counts + count-based sorting
+
+**Completed:** no
+Status: TODO — important for doujins (sort galleries/videos by likes/favorites/comments; sort posts/comments by best). Decisions settled with the owner.
+
+**Problem:** today socialkit denormalizes like/dislike counts on the owning row (`social_comments.likes/dislikes`, `social_posts.total_*`) transactionally + exact, and `reply_count` on the comment — BUT there is NO per-*entity* aggregate, so "likes/favorites/comment_count on gallery X" is computed on read via COUNT/GROUP BY. That is fine for one item's detail page but cannot efficiently **sort many items** by those counts, and there's no index to rank on. Two known miscounts to fix too: `reply_count` isn't decremented on reply soft-delete (drifts high); generic-entity reaction counts are on-read GROUP BY.
+
+**Owner decisions:**
+- **Transactional upkeep** (not async): upsert the rollup in the SAME tx as each reaction/favorite/comment write — exact + always fresh + no worker (matches doujins' current triggers). Build it behind a seam so a specific hot counter can move to a dirty-set + background recompute later; source tables stay authoritative so a one-shot recompute can always rebuild.
+- **socialkit sorts its own lists too**: posts + comments list endpoints accept `sort=newest|likes|best|comments` ordering off the rollup; host-entity lists (galleries/videos) sort host-side by JOINing the rollup.
+
+**Design:**
+- New table `social_entity_counts(entity_type, entity_id, likes, dislikes, favorites, comment_count, updated_at, PK(entity_type,entity_id))`, indexed for sort: `(entity_type, likes DESC)`, `(entity_type, favorites DESC)`, `(entity_type, comment_count DESC)`, and a "best" ranking — a Wilson lower-bound (or `likes::float/NULLIF(likes+dislikes,0)`) expression index so a 900/1000 outranks a 1/1.
+- Maintain in-tx: `reactions.applyTx` upserts likes/dislikes deltas for ANY reacted entity (uniform across gallery/video/comment/post); `favorites` add/remove upserts favorites ±1; top-level `comments` create/soft-delete upserts comment_count ±1. Fix: `reply_count` decrements on reply soft-delete.
+- Reads switch to O(1) rollup: generic reaction counts, `favorites.Count/CountsByEntity`, and a public `Counts(entityType, entityID)` / `CountsByEntity(entityType, ids)` API so hosts read + sort gallery/video counts.
+- Keep the owning-row like/dislike columns for now (additive, lower risk) OR unify to the rollup as the single denorm source — decide during impl (unify preferred if the read-path refactor stays clean).
+
+**Tasks:**
+- [ ] `social_entity_counts` table + sort indexes (incl. the best/Wilson expression index).
+- [ ] In-tx maintenance across reactions / favorites / comments; `reply_count`-on-delete fix.
+- [ ] Rollup-backed reads + public `Counts`/`CountsByEntity`.
+- [ ] `sort=` on posts + comments lists (newest|likes|best|comments).
+- [ ] Integration tests: exact under concurrency, sort correctness (incl. like-percentage), reply_count decrement, self-heal recompute.
+
+Acceptance: any item's likes/dislikes/favorites/comment_count read O(1) and sort efficiently (incl. like-ratio); counts stay exact under concurrency; `reply_count` never drifts; a recompute-from-source can rebuild the rollup.
+
+---
+
+# #21: Inline post media upload
+
+**Completed:** no
+Status: TODO (small) — needed for blog: the editor uploads an image mid-article and gets a URL to embed in the Quill Delta body.
+
+socialkit's media store already does poll option images + post covers; add a general `POST /posts/media` (PostWrite-gated, multipart) that uploads to the media store under `posts/media/{uuid}.{ext}` and returns `{url}`. The editor drops that URL into the Delta, so inline images carry their final socialkit-bucket URL at write time (kills doujins' read-time image-URL rewrite for new posts).
+
+**Tasks:**
+- [ ] `POST /posts/media` handler + route; test with the fake media store + perm gate.
+
+Acceptance: an authorized editor uploads an inline image and gets a stable public URL; unauthorized → 403.

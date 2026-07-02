@@ -240,6 +240,27 @@ func TestComments_ReactionCountersExact(t *testing.T) {
 	}
 }
 
+func TestComments_ReplyCountDecrementsOnDelete(t *testing.T) {
+	rt := commentsRuntime(t, Options{})
+	ctx := context.Background()
+	author := Actor{ID: "author"}
+	parent := mustComment(t, rt, author, "gallery", "1", createInput{Body: "p"})
+	r1 := mustComment(t, rt, author, "gallery", "1", createInput{Body: "r1", ParentID: parent.ID})
+	_ = mustComment(t, rt, author, "gallery", "1", createInput{Body: "r2", ParentID: parent.ID})
+
+	top, _ := rt.comments.list(ctx, author, "gallery", "1", 10, 0)
+	if got := top[indexOfComment(top, parent.ID)].ReplyCount; got != 2 {
+		t.Fatalf("reply_count = %d, want 2", got)
+	}
+	if err := rt.comments.softDelete(ctx, author, r1.ID); err != nil {
+		t.Fatalf("delete reply: %v", err)
+	}
+	top, _ = rt.comments.list(ctx, author, "gallery", "1", 10, 0)
+	if got := top[indexOfComment(top, parent.ID)].ReplyCount; got != 1 {
+		t.Fatalf("reply_count after reply delete = %d, want 1 (drifted)", got)
+	}
+}
+
 // --- helpers ---
 
 func resolverWith(entityType, id string) *fakeResolver {

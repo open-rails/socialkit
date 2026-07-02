@@ -149,6 +149,12 @@ func (f *fakeMedia) stored(key string) ([]byte, bool) {
 	return d, ok
 }
 
+func (f *fakeMedia) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.puts)
+}
+
 // recordingRecorder captures emitted signals for assertions.
 type recordingRecorder struct {
 	mu        sync.Mutex

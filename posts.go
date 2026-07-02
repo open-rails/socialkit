@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -84,6 +85,29 @@ func (p *posts) mount(mux *http.ServeMux) {
 	mux.HandleFunc("POST /posts/{id}/dislike", p.handleReact(-1))
 	mux.HandleFunc("POST /posts/{id}/neutral", p.handleReact(0))
 	mux.HandleFunc("POST /posts/{id}/cover", p.handleCover)
+	mux.HandleFunc("POST /posts/media", p.handleMedia)
+}
+
+// handleMedia uploads an inline post image (editor drops the returned URL into
+// the body). Not post-scoped — the editor uploads while composing a draft.
+// PostWrite-gated.
+func (p *posts) handleMedia(w http.ResponseWriter, req *http.Request) {
+	actor := p.rt.actor(req.Context())
+	if err := p.rt.requirePerm(req.Context(), actor, p.rt.perms.PostWrite); err != nil {
+		writeErr(w, err)
+		return
+	}
+	data, ct, ext, err := readUpload(req)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	url, err := p.rt.media.Put(req.Context(), "posts/media/"+uuid.NewString()+"."+ext, data, ct)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"url": url})
 }
 
 // handleCover uploads a post cover to socialkit's media store and stores the
