@@ -54,6 +54,60 @@ func TestCounts_RollupAggregates(t *testing.T) {
 	}
 }
 
+func TestMyReactions_BatchAndByActor(t *testing.T) {
+	res := &fakeResolver{}
+	for _, id := range []string{"t1", "t2", "t3"} {
+		res.set("tag", id, true, true)
+	}
+	rt, _ := newTestRuntime(t, Options{Entities: res, EntityTypes: []string{"tag"}})
+	ctx := context.Background()
+	u := Actor{ID: "u1"}
+
+	must := func(err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	must(reactErr(rt.reactions.react(ctx, u, "tag", "t1", 1)))
+	must(reactErr(rt.reactions.react(ctx, u, "tag", "t2", -1)))
+	must(reactErr(rt.reactions.react(ctx, Actor{ID: "u2"}, "tag", "t3", 1))) // someone else
+
+	m, err := rt.MyReactions(ctx, u, []EntityKey{
+		{Type: "tag", ID: "t1"}, {Type: "tag", ID: "t2"}, {Type: "tag", ID: "t3"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m[EntityKey{"tag", "t1"}] != 1 || m[EntityKey{"tag", "t2"}] != -1 {
+		t.Fatalf("MyReactions = %+v, want t1=1 t2=-1", m)
+	}
+	if _, ok := m[EntityKey{"tag", "t3"}]; ok {
+		t.Fatal("t3 belongs to another actor; it must be absent")
+	}
+
+	// Neutralizing removes the row from both reads.
+	must(reactErr(rt.reactions.react(ctx, u, "tag", "t2", 0)))
+	list, err := rt.ReactionsByActor(ctx, u, "tag", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list) != 1 || list[0].EntityID != "t1" || list[0].Value != 1 {
+		t.Fatalf("ReactionsByActor = %+v, want only t1=1", list)
+	}
+
+	// Anonymous actors read via their IP key.
+	anon := Actor{Anonymous: true, IP: "10.0.0.9"}
+	must(reactErr(rt.reactions.react(ctx, anon, "tag", "t3", 1)))
+	am, err := rt.MyReactions(ctx, anon, []EntityKey{{Type: "tag", ID: "t3"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if am[EntityKey{"tag", "t3"}] != 1 {
+		t.Fatalf("anon MyReactions = %+v, want t3=1", am)
+	}
+}
+
 func TestCounts_CommentCountLifecycle(t *testing.T) {
 	rt := commentsRuntime(t, Options{})
 	ctx := context.Background()

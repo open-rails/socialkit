@@ -3,6 +3,7 @@ package socialkit
 import (
 	"context"
 	"errors"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -83,6 +84,80 @@ func (rt *Runtime) LatestComments(ctx context.Context, actor Actor, limit, offse
 		limit = 20
 	}
 	return rt.comments.latest(ctx, actor, limit, offset)
+}
+
+// MyReactions batch-reads the actor's own reaction (-1/0/1) for many targets —
+// the host-facing hydration read for list/detail responses (doujins-style
+// `user_reaction` enrichment). Only nonzero reactions appear in the map.
+func (rt *Runtime) MyReactions(ctx context.Context, actor Actor, targets []EntityKey) (map[EntityKey]int16, error) {
+	out := make(map[EntityKey]int16, len(targets))
+	userID, ip, ok := reactionKey(actor)
+	if !ok || len(targets) == 0 {
+		return out, nil
+	}
+	types := make([]string, len(targets))
+	ids := make([]string, len(targets))
+	for i, k := range targets {
+		types[i], ids[i] = k.Type, k.ID
+	}
+	// unnest pairs type/id positionally (no cross-matching, one round-trip).
+	rows, err := rt.store.pool.Query(ctx, `SELECT entity_type, entity_id, value
+		FROM `+rt.store.t.reactions+`
+		WHERE `+actorPred(userID, 1)+` AND value <> 0 AND (entity_type, entity_id) IN (
+			SELECT * FROM unnest($2::text[], $3::text[]))`,
+		actorArg(userID, ip), types, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var k EntityKey
+		var v int16
+		if err := rows.Scan(&k.Type, &k.ID, &v); err != nil {
+			return nil, err
+		}
+		out[k] = v
+	}
+	return out, rows.Err()
+}
+
+// ActorReaction is one row of an actor's reaction history for one entity type.
+type ActorReaction struct {
+	EntityID  string    `json:"entity_id"`
+	Value     int16     `json:"value"` // -1 or 1 (neutral rows are excluded)
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// ReactionsByActor lists the actor's nonzero reactions of one entity type,
+// newest-first (host-facing; e.g. a "my tag preferences" page). limit <= 0
+// means all.
+func (rt *Runtime) ReactionsByActor(ctx context.Context, actor Actor, entityType string, limit, offset int) ([]ActorReaction, error) {
+	userID, ip, ok := reactionKey(actor)
+	if !ok {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 1<<31 - 1
+	}
+	rows, err := rt.store.pool.Query(ctx, `SELECT entity_id, value, created_at, updated_at
+		FROM `+rt.store.t.reactions+`
+		WHERE entity_type = $1 AND `+actorPred(userID, 2)+` AND value <> 0
+		ORDER BY updated_at DESC LIMIT $3 OFFSET $4`,
+		entityType, actorArg(userID, ip), limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]ActorReaction, 0, min(limit, 128))
+	for rows.Next() {
+		var r ActorReaction
+		if err := rows.Scan(&r.EntityID, &r.Value, &r.CreatedAt, &r.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }
 
 // IsFavorited batch-checks bookmarks for a user (host-facing; every requested
