@@ -54,7 +54,7 @@ central migrate step and register `socialkit.PostgresMigrations` with migratekit
 
 ## Status
 
-v1 in progress. See `.agents/progress.md`. Reactions + the host boundary +
+v1 in progress. See `../open-rails-tracker/socialkit/progress.md`. Reactions + the host boundary +
 schema + embed runtime + default moderation are built; comments, polls, posts,
 and favorites are landing next.
 
