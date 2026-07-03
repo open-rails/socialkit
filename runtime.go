@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -74,6 +75,9 @@ type Runtime struct {
 	content  ContentProcessor
 	perms    Perms
 	types    map[string]struct{}
+	// mediaBase absolutizes stored relative media paths (legacy/backfilled rows)
+	// against the public bucket origin; empty = serve values verbatim.
+	mediaBase string
 
 	reactions *reactions
 	polls     *polls
@@ -113,6 +117,9 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 		content:  orDefault[ContentProcessor](opts.Content, stripProcessor{}),
 		perms:    opts.Perms,
 		types:    make(map[string]struct{}, len(opts.EntityTypes)),
+	}
+	if opts.Storage != nil {
+		rt.mediaBase = strings.TrimRight(opts.Storage.PublicBaseURL, "/")
 	}
 	for _, t := range opts.EntityTypes {
 		rt.types[t] = struct{}{}
@@ -209,6 +216,15 @@ func (rt *Runtime) requirePerm(ctx context.Context, actor Actor, perm string) er
 		return errForbidden
 	}
 	return nil
+}
+
+// absMediaURL absolutizes a stored relative media path (legacy/backfilled data)
+// against the public bucket origin; absolute URLs and unset values pass through.
+func (rt *Runtime) absMediaURL(u string) string {
+	if u == "" || rt.mediaBase == "" || strings.HasPrefix(u, "http://") || strings.HasPrefix(u, "https://") {
+		return u
+	}
+	return rt.mediaBase + "/" + strings.TrimLeft(u, "/")
 }
 
 // actor reads the (possibly anonymous) authenticated actor from context.

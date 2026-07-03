@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -33,18 +35,23 @@ type pollOption struct {
 
 // pollView is a question plus its options and the caller's own vote (if any).
 type pollView struct {
-	ID       string       `json:"id"`
-	Question string       `json:"question"`
-	Language string       `json:"language"`
-	IsActive bool         `json:"is_active"`
-	Options  []pollOption `json:"options"`
-	Voted    bool         `json:"voted"`
-	MyOption string       `json:"my_option,omitempty"`
+	ID         string       `json:"id"`
+	Question   string       `json:"question"`
+	Language   string       `json:"language"`
+	IsActive   bool         `json:"is_active"`
+	ImageURL   string       `json:"image_url,omitempty"`
+	LiveAt     time.Time    `json:"live_at"`
+	TotalVotes int          `json:"total_votes"`
+	Options    []pollOption `json:"options"`
+	Voted      bool         `json:"voted"`
+	MyOption   string       `json:"my_option,omitempty"`
 }
 
 type createPollInput struct {
 	Question string              `json:"question"`
 	Language string              `json:"language"`
+	ImageURL string              `json:"image_url,omitempty"`
+	LiveAt   *time.Time          `json:"live_at,omitempty"` // nil = live now
 	Options  []createOptionInput `json:"options"`
 }
 
@@ -58,8 +65,10 @@ type createOptionInput struct {
 
 // updatePollInput uses pointers so absent fields are left untouched (COALESCE).
 type updatePollInput struct {
-	Question *string `json:"question"`
-	IsActive *bool   `json:"is_active"`
+	Question *string    `json:"question"`
+	IsActive *bool      `json:"is_active"`
+	LiveAt   *time.Time `json:"live_at"`
+	ImageURL *string    `json:"image_url"`
 }
 
 // --- admin (PollWrite-gated) ---
@@ -91,7 +100,8 @@ func (p *polls) create(ctx context.Context, actor Actor, in createPollInput) (po
 
 	var id string
 	if err := tx.QueryRow(ctx, `INSERT INTO `+p.s.t.pollQuestions+`
-		(question, language) VALUES ($1, $2) RETURNING id::text`, in.Question, in.Language).Scan(&id); err != nil {
+		(question, language, image_url, live_at) VALUES ($1, $2, $3, COALESCE($4, now()))
+		RETURNING id::text`, in.Question, in.Language, nullIf(in.ImageURL), in.LiveAt).Scan(&id); err != nil {
 		return pollView{}, err
 	}
 	for _, o := range in.Options {
@@ -120,8 +130,9 @@ func (p *polls) update(ctx context.Context, actor Actor, id string, in updatePol
 		in.Question = &q
 	}
 	tag, err := p.s.pool.Exec(ctx, `UPDATE `+p.s.t.pollQuestions+`
-		SET question = COALESCE($2, question), is_active = COALESCE($3, is_active), updated_at = now()
-		WHERE id = $1 AND deleted_at IS NULL`, id, in.Question, in.IsActive)
+		SET question = COALESCE($2, question), is_active = COALESCE($3, is_active),
+		    live_at = COALESCE($4, live_at), image_url = COALESCE($5, image_url), updated_at = now()
+		WHERE id = $1 AND deleted_at IS NULL`, id, in.Question, in.IsActive, in.LiveAt, in.ImageURL)
 	if err != nil {
 		return pollView{}, err
 	}
@@ -149,17 +160,36 @@ func (p *polls) softDelete(ctx context.Context, actor Actor, id string) error {
 
 // --- public read ---
 
-// list returns active, non-deleted polls (optionally language-filtered) with
-// options and the caller's vote. Empty language means "all languages".
-func (p *polls) list(ctx context.Context, actor Actor, language string) ([]pollView, error) {
-	sql := `SELECT id::text, question, language, is_active FROM ` + p.s.t.pollQuestions + `
-		WHERE deleted_at IS NULL AND is_active = true`
-	var args []any
-	if language != "" {
-		sql += ` AND language = $1`
-		args = append(args, language)
+// listFilter narrows list: language, a month ("2006-01") or day ("2006-01-02")
+// live_at window, and admin (include future/inactive polls; PollWrite-gated by
+// the caller).
+type listFilter struct {
+	language, month, date string
+	admin                 bool
+	limit, offset         int
+}
+
+// list returns non-deleted polls newest-live-first with options + caller vote.
+// Public mode serves only live (live_at <= now) active polls; future/inactive
+// polls never leak.
+func (p *polls) list(ctx context.Context, actor Actor, f listFilter) ([]pollView, error) {
+	sql := `SELECT id::text, question, language, is_active, coalesce(image_url,''), live_at
+		FROM ` + p.s.t.pollQuestions + ` WHERE deleted_at IS NULL`
+	if !f.admin {
+		sql += ` AND is_active = true AND live_at <= now()`
 	}
-	sql += ` ORDER BY created_at DESC`
+	var args []any
+	arg := func(v any) string {
+		args = append(args, v)
+		return "$" + strconv.Itoa(len(args))
+	}
+	if f.language != "" {
+		sql += ` AND language = ` + arg(f.language)
+	}
+	if from, to, ok := parseWindow(f.month, f.date); ok {
+		sql += ` AND live_at >= ` + arg(from) + ` AND live_at < ` + arg(to)
+	}
+	sql += ` ORDER BY live_at DESC LIMIT ` + arg(f.limit) + ` OFFSET ` + arg(f.offset)
 
 	rows, err := p.s.pool.Query(ctx, sql, args...)
 	if err != nil {
@@ -167,73 +197,98 @@ func (p *polls) list(ctx context.Context, actor Actor, language string) ([]pollV
 	}
 	defer rows.Close()
 	var views []pollView
-	var ids []string
-	idx := map[string]int{}
 	for rows.Next() {
 		v := pollView{Options: []pollOption{}}
-		if err := rows.Scan(&v.ID, &v.Question, &v.Language, &v.IsActive); err != nil {
+		if err := rows.Scan(&v.ID, &v.Question, &v.Language, &v.IsActive, &v.ImageURL, &v.LiveAt); err != nil {
 			return nil, err
 		}
-		idx[v.ID] = len(views)
 		views = append(views, v)
-		ids = append(ids, v.ID)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	if len(views) == 0 {
-		return []pollView{}, nil
-	}
-
-	opts, err := p.optionsFor(ctx, p.s.pool, ids)
-	if err != nil {
+	if err := p.attach(ctx, actor, views); err != nil {
 		return nil, err
 	}
-	votes, err := p.votesFor(ctx, p.s.pool, actor, ids)
-	if err != nil {
-		return nil, err
-	}
-	for qid, i := range idx {
-		if o := opts[qid]; o != nil {
-			views[i].Options = o
-		}
-		if oid, ok := votes[qid]; ok {
-			views[i].Voted, views[i].MyOption = true, oid
-		}
+	if views == nil {
+		views = []pollView{}
 	}
 	return views, nil
 }
 
-// get returns one non-deleted poll (active or not) with options + caller vote.
+// parseWindow converts a month ("2006-01") or day ("2006-01-02") into a
+// [from, to) UTC range; date wins when both are given.
+func parseWindow(month, date string) (from, to time.Time, ok bool) {
+	if date != "" {
+		if d, err := time.Parse("2006-01-02", date); err == nil {
+			return d, d.AddDate(0, 0, 1), true
+		}
+	}
+	if month != "" {
+		if m, err := time.Parse("2006-01", month); err == nil {
+			return m, m.AddDate(0, 1, 0), true
+		}
+	}
+	return time.Time{}, time.Time{}, false
+}
+
+// get returns one non-deleted poll (any state) with options + caller vote; the
+// HTTP layer live-gates public access.
 func (p *polls) get(ctx context.Context, actor Actor, id string) (pollView, error) {
 	if id == "" {
 		return pollView{}, ErrNotFound
 	}
 	v := pollView{Options: []pollOption{}}
-	err := p.s.pool.QueryRow(ctx, `SELECT id::text, question, language, is_active
+	err := p.s.pool.QueryRow(ctx, `SELECT id::text, question, language, is_active, coalesce(image_url,''), live_at
 		FROM `+p.s.t.pollQuestions+` WHERE id = $1 AND deleted_at IS NULL`, id).
-		Scan(&v.ID, &v.Question, &v.Language, &v.IsActive)
+		Scan(&v.ID, &v.Question, &v.Language, &v.IsActive, &v.ImageURL, &v.LiveAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return pollView{}, ErrNotFound
 	}
 	if err != nil {
 		return pollView{}, err
 	}
-	opts, err := p.optionsFor(ctx, p.s.pool, []string{id})
-	if err != nil {
+	views := []pollView{v}
+	if err := p.attach(ctx, actor, views); err != nil {
 		return pollView{}, err
 	}
-	if o := opts[id]; o != nil {
-		v.Options = o
+	return views[0], nil
+}
+
+// attach batch-loads options + the caller's votes into views, sums total_votes,
+// and absolutizes stored-relative image paths (backfilled legacy rows).
+func (p *polls) attach(ctx context.Context, actor Actor, views []pollView) error {
+	if len(views) == 0 {
+		return nil
 	}
-	votes, err := p.votesFor(ctx, p.s.pool, actor, []string{id})
+	ids := make([]string, len(views))
+	for i := range views {
+		ids[i] = views[i].ID
+	}
+	opts, err := p.optionsFor(ctx, p.s.pool, ids)
 	if err != nil {
-		return pollView{}, err
+		return err
 	}
-	if oid, ok := votes[id]; ok {
-		v.Voted, v.MyOption = true, oid
+	votes, err := p.votesFor(ctx, p.s.pool, actor, ids)
+	if err != nil {
+		return err
 	}
-	return v, nil
+	for i := range views {
+		views[i].ImageURL = p.rt.absMediaURL(views[i].ImageURL)
+		if o := opts[views[i].ID]; o != nil {
+			views[i].Options = o
+		}
+		total := 0
+		for j := range views[i].Options {
+			views[i].Options[j].ImageURL = p.rt.absMediaURL(views[i].Options[j].ImageURL)
+			total += views[i].Options[j].VoteCount
+		}
+		views[i].TotalVotes = total
+		if oid, ok := votes[views[i].ID]; ok {
+			views[i].Voted, views[i].MyOption = true, oid
+		}
+	}
+	return nil
 }
 
 // optionsFor batch-loads options keyed by question id (one array-param query).
@@ -296,10 +351,11 @@ func (p *polls) vote(ctx context.Context, actor Actor, pollID, optionID string) 
 	}
 	defer tx.Rollback(ctx)
 
-	// Poll must exist, be live and not soft-deleted (hide both as 404).
+	// Poll must exist, be live (live_at reached), active, and not soft-deleted
+	// (hide all as 404 — a future poll must not leak via the vote path).
 	var exists bool
 	err = tx.QueryRow(ctx, `SELECT true FROM `+p.s.t.pollQuestions+`
-		WHERE id = $1 AND deleted_at IS NULL AND is_active = true`, pollID).Scan(&exists)
+		WHERE id = $1 AND deleted_at IS NULL AND is_active = true AND live_at <= now()`, pollID).Scan(&exists)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return pollView{}, ErrNotFound
 	}
@@ -348,12 +404,50 @@ func pollVoteConflict(userID string) string {
 
 func (p *polls) mount(mux *http.ServeMux) {
 	mux.HandleFunc("GET /polls", p.handleList)
+	mux.HandleFunc("GET /polls/admin", p.handleAdminList) // literal beats {id}
 	mux.HandleFunc("GET /polls/{id}", p.handleGet)
 	mux.HandleFunc("POST /polls", p.handleCreate)
 	mux.HandleFunc("PATCH /polls/{id}", p.handleUpdate)
 	mux.HandleFunc("DELETE /polls/{id}", p.handleDelete)
 	mux.HandleFunc("POST /polls/{id}/vote", p.handleVote)
+	mux.HandleFunc("POST /polls/{id}/image", p.handleQuestionImage)
 	mux.HandleFunc("POST /polls/options/{oid}/image", p.handleOptionImage)
+}
+
+// handleQuestionImage uploads a question-level image and stores its public URL.
+// PollWrite-gated.
+func (p *polls) handleQuestionImage(w http.ResponseWriter, req *http.Request) {
+	actor := p.rt.actor(req.Context())
+	if err := p.rt.requirePerm(req.Context(), actor, p.rt.perms.PollWrite); err != nil {
+		writeErr(w, err)
+		return
+	}
+	id := req.PathValue("id")
+	if !uuidRe.MatchString(id) {
+		writeErr(w, ErrNotFound)
+		return
+	}
+	data, ct, ext, err := readUpload(req)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	url, err := p.rt.media.Put(req.Context(), "polls/"+id+"."+ext, data, ct)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	tag, err := p.s.pool.Exec(req.Context(), `UPDATE `+p.s.t.pollQuestions+`
+		SET image_url = $2, updated_at = now() WHERE id = $1 AND deleted_at IS NULL`, id, url)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		writeErr(w, ErrNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"image_url": url})
 }
 
 // handleOptionImage uploads an option image to socialkit's media store and
@@ -392,7 +486,33 @@ func (p *polls) handleOptionImage(w http.ResponseWriter, req *http.Request) {
 }
 
 func (p *polls) handleList(w http.ResponseWriter, req *http.Request) {
-	views, err := p.list(req.Context(), p.rt.actor(req.Context()), req.URL.Query().Get("language"))
+	q := req.URL.Query()
+	limit, offset := parsePage(req)
+	views, err := p.list(req.Context(), p.rt.actor(req.Context()), listFilter{
+		language: q.Get("language"), month: q.Get("month"), date: q.Get("date"),
+		limit: limit, offset: offset,
+	})
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, views)
+}
+
+// handleAdminList returns ALL non-deleted polls (future/inactive included) for
+// the poll-management UI. PollWrite-gated.
+func (p *polls) handleAdminList(w http.ResponseWriter, req *http.Request) {
+	actor := p.rt.actor(req.Context())
+	if err := p.rt.requirePerm(req.Context(), actor, p.rt.perms.PollWrite); err != nil {
+		writeErr(w, err)
+		return
+	}
+	q := req.URL.Query()
+	limit, offset := parsePage(req)
+	views, err := p.list(req.Context(), actor, listFilter{
+		language: q.Get("language"), month: q.Get("month"), date: q.Get("date"),
+		admin: true, limit: limit, offset: offset,
+	})
 	if err != nil {
 		writeErr(w, err)
 		return
@@ -401,10 +521,18 @@ func (p *polls) handleList(w http.ResponseWriter, req *http.Request) {
 }
 
 func (p *polls) handleGet(w http.ResponseWriter, req *http.Request) {
-	v, err := p.get(req.Context(), p.rt.actor(req.Context()), req.PathValue("id"))
+	actor := p.rt.actor(req.Context())
+	v, err := p.get(req.Context(), actor, req.PathValue("id"))
 	if err != nil {
 		writeErr(w, err)
 		return
+	}
+	// Future/inactive polls are admin-only; hide as 404 (don't leak schedules).
+	if !v.IsActive || v.LiveAt.After(time.Now()) {
+		if err := p.rt.requirePerm(req.Context(), actor, p.rt.perms.PollWrite); err != nil {
+			writeErr(w, ErrNotFound)
+			return
+		}
 	}
 	writeJSON(w, http.StatusOK, v)
 }

@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"sync"
 	"testing"
+	"time"
 )
 
 // pollAdmin is the gated writer; pollWritePerm must be non-empty or requirePerm
@@ -68,7 +69,7 @@ func TestPolls_LifecycleCreateListVoteTally(t *testing.T) {
 		t.Fatalf("created poll malformed: %+v", created)
 	}
 
-	views, err := p.list(ctx, pollAdmin, "")
+	views, err := p.list(ctx, pollAdmin, listFilter{limit: 20})
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -178,7 +179,7 @@ func TestPolls_LanguageSlicing(t *testing.T) {
 		t.Fatalf("create en: %v", err)
 	}
 
-	views, err := p.list(ctx, pollAdmin, "en")
+	views, err := p.list(ctx, pollAdmin, listFilter{language: "en", limit: 20})
 	if err != nil {
 		t.Fatalf("list en: %v", err)
 	}
@@ -228,7 +229,7 @@ func TestPolls_HasVotedReflectedPerCaller(t *testing.T) {
 	if !gv.Voted || gv.MyOption != opt {
 		t.Fatalf("get for voter = %+v, want voted=true my_option=%s", gv, opt)
 	}
-	lv, err := p.list(ctx, voter, "")
+	lv, err := p.list(ctx, voter, listFilter{limit: 20})
 	if err != nil {
 		t.Fatalf("list voter: %v", err)
 	}
@@ -295,4 +296,151 @@ func doPollReq(t *testing.T, h http.Handler, method, target string, body any, ac
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	return rec
+}
+
+// pollAdminOnly authorizes only the admin actor — lets one runtime test both
+// admin success and public denial paths.
+type pollAdminOnly struct{}
+
+func (pollAdminOnly) Can(_ context.Context, a Actor, _ string) (bool, error) {
+	return a.ID == "admin", nil
+}
+
+func TestPolls_LiveGatingAndAdminList(t *testing.T) {
+	rt, p := newPollTest(t, Options{Authz: pollAdminOnly{}})
+	ctx := context.Background()
+	future := time.Now().Add(time.Hour)
+
+	live, err := p.create(ctx, pollAdmin, twoOptionPoll("en"))
+	if err != nil {
+		t.Fatalf("create live: %v", err)
+	}
+	sched := twoOptionPoll("en")
+	sched.LiveAt = &future
+	scheduled, err := p.create(ctx, pollAdmin, sched)
+	if err != nil {
+		t.Fatalf("create scheduled: %v", err)
+	}
+
+	// Public list: only the live poll; admin list: both, newest-live-first.
+	pub, err := p.list(ctx, Actor{ID: "user1"}, listFilter{limit: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pub) != 1 || pub[0].ID != live.ID {
+		t.Fatalf("public list leaked a future poll: %+v", pollIDs(pub))
+	}
+	adm, err := p.list(ctx, pollAdmin, listFilter{admin: true, limit: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(adm) != 2 || adm[0].ID != scheduled.ID {
+		t.Fatalf("admin list = %v, want [scheduled, live]", pollIDs(adm))
+	}
+
+	// HTTP: a future poll 404s for the public but serves for the admin; the
+	// admin list endpoint 403s for the public.
+	get := func(actor Actor, path string) int {
+		req := httptest.NewRequest("GET", path, nil)
+		req = req.WithContext(withActor(req.Context(), actor))
+		rec := httptest.NewRecorder()
+		rt.Handler().ServeHTTP(rec, req)
+		return rec.Code
+	}
+	if code := get(Actor{ID: "user1"}, "/polls/"+scheduled.ID); code != http.StatusNotFound {
+		t.Fatalf("public GET future poll = %d, want 404", code)
+	}
+	if code := get(pollAdmin, "/polls/"+scheduled.ID); code != http.StatusOK {
+		t.Fatalf("admin GET future poll = %d, want 200", code)
+	}
+	if code := get(Actor{ID: "user1"}, "/polls/admin"); code != http.StatusForbidden {
+		t.Fatalf("public GET /polls/admin = %d, want 403", code)
+	}
+
+	// Voting on a not-yet-live poll is a 404 (no schedule leak).
+	if _, err := p.vote(ctx, Actor{ID: "user1"}, scheduled.ID, scheduled.Options[0].ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("vote on future poll: want ErrNotFound, got %v", err)
+	}
+	// Rescheduling it into the past makes it publicly live.
+	past := time.Now().Add(-time.Minute)
+	if _, err := p.update(ctx, pollAdmin, scheduled.ID, updatePollInput{LiveAt: &past}); err != nil {
+		t.Fatal(err)
+	}
+	pub, _ = p.list(ctx, Actor{ID: "user1"}, listFilter{limit: 20})
+	if len(pub) != 2 {
+		t.Fatalf("after reschedule, public list = %v, want both", pollIDs(pub))
+	}
+}
+
+func TestPolls_MonthWindowsTotalsAndImageAbsolutization(t *testing.T) {
+	_, p := newPollTest(t, Options{Storage: &StorageConfig{Bucket: "b", PublicBaseURL: "https://cdn.test/"}})
+	ctx := context.Background()
+
+	mk := func(lang, live string) pollView {
+		t.Helper()
+		at, _ := time.Parse("2006-01-02", live)
+		in := twoOptionPoll(lang)
+		in.LiveAt = &at
+		v, err := p.create(ctx, pollAdmin, in)
+		if err != nil {
+			t.Fatalf("create %s: %v", live, err)
+		}
+		return v
+	}
+	may := mk("en", "2024-05-15")
+	jun := mk("en", "2024-06-15")
+
+	got, err := p.list(ctx, pollAdmin, listFilter{month: "2024-05", limit: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != may.ID {
+		t.Fatalf("month=2024-05 -> %v, want [may]", pollIDs(got))
+	}
+	got, err = p.list(ctx, pollAdmin, listFilter{date: "2024-06-15", limit: 20})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].ID != jun.ID {
+		t.Fatalf("date=2024-06-15 -> %v, want [jun]", pollIDs(got))
+	}
+
+	// TotalVotes sums option counters.
+	if _, err := p.vote(ctx, Actor{ID: "v1"}, may.ID, may.Options[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.vote(ctx, Actor{ID: "v2"}, may.ID, may.Options[1].ID); err != nil {
+		t.Fatal(err)
+	}
+	v, _ := p.get(ctx, pollAdmin, may.ID)
+	if v.TotalVotes != 2 || v.TotalVotes != totalVotes(v) {
+		t.Fatalf("TotalVotes = %d (options sum %d), want 2", v.TotalVotes, totalVotes(v))
+	}
+
+	// A stored RELATIVE path (backfilled legacy row) absolutizes against the
+	// public bucket origin; an absolute URL passes through untouched.
+	rel := "assets/poll-images/legacy.webp"
+	if _, err := p.update(ctx, pollAdmin, may.ID, updatePollInput{ImageURL: &rel}); err != nil {
+		t.Fatal(err)
+	}
+	abs := "https://elsewhere.example/x.png"
+	if _, err := p.update(ctx, pollAdmin, jun.ID, updatePollInput{ImageURL: &abs}); err != nil {
+		t.Fatal(err)
+	}
+	v, _ = p.get(ctx, pollAdmin, may.ID)
+	if v.ImageURL != "https://cdn.test/assets/poll-images/legacy.webp" {
+		t.Fatalf("relative image not absolutized: %q", v.ImageURL)
+	}
+	v, _ = p.get(ctx, pollAdmin, jun.ID)
+	if v.ImageURL != abs {
+		t.Fatalf("absolute image mangled: %q", v.ImageURL)
+	}
+}
+
+func pollIDs(vs []pollView) []string {
+	ids := make([]string, len(vs))
+	for i := range vs {
+		ids[i] = vs[i].ID
+	}
+	return ids
 }

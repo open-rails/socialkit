@@ -206,6 +206,7 @@ Acceptance: reactions on any registered entity type; blocked on inaccessible tar
 
 **Completed:** yes
 Status: DONE — `polls.go`. Admin CRUD gated by `PollWrite`; public list (by language) + get + vote. Anon-by-IP, dup-guard via partial-unique + `INSERT ... ON CONFLICT DO NOTHING` (increment `vote_count` only when RowsAffected==1). Integration-tested incl. concurrent duplicate-vote exactness, per-language slicing, admin gate.
+DOUJINS-PARITY PASS (2026-07-02, from the audit): `live_at` scheduled publish (public list/get/vote gate on `live_at <= now()`; future polls hidden as 404), question-level `image_url` + upload (`POST /polls/{id}/image`), month/date archive windows (`?month=YYYY-MM`, `?date=YYYY-MM-DD`), `total_votes` in the view, paginated `GET /polls/admin` (PollWrite-gated, includes future/inactive), and read-time absolutization of stored-RELATIVE image paths against `Storage.PublicBaseURL` (so backfilled doujins rows copy as-is). Duplicate vote = idempotent 200 returning current `voted`/`my_option` (no 409 string contract — frontend reads state from the response). All integration-tested.
 
 Standalone site-wide polls (doujins-only today → hentai0 gains it free). Lowest coupling.
 

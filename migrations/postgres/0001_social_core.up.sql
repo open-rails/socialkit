@@ -71,12 +71,15 @@ CREATE TABLE social_poll_questions (
     question   text        NOT NULL,
     language   text        NOT NULL DEFAULT '',
     is_active  boolean     NOT NULL DEFAULT true,
+    image_url  text,
+    live_at    timestamptz NOT NULL DEFAULT now(),  -- scheduled publish; public reads gate on live_at <= now()
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now(),
     deleted_at timestamptz
 );
-CREATE INDEX social_poll_questions_active_idx
-    ON social_poll_questions (language, is_active) WHERE deleted_at IS NULL;
+-- Live/active selection + month-archive windows, newest-live-first.
+CREATE INDEX social_poll_questions_live_idx
+    ON social_poll_questions (language, live_at DESC) WHERE deleted_at IS NULL AND is_active;
 
 CREATE TABLE social_poll_options (
     id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),
