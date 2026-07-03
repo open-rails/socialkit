@@ -18,13 +18,13 @@ func TestCounts_RollupAggregates(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	must(rt.reactions.react(ctx, Actor{ID: "u1"}, "gallery", "g1", 1))  // like
-	must(rt.reactions.react(ctx, Actor{ID: "u2"}, "gallery", "g1", -1)) // dislike
-	must(rt.favorites.add(ctx, Actor{ID: "u1"}, "gallery", "g1"))       // favorite
+	must(reactErr(rt.reactions.react(ctx, Actor{ID: "u1"}, "gallery", "g1", 1)))  // like
+	must(reactErr(rt.reactions.react(ctx, Actor{ID: "u2"}, "gallery", "g1", -1))) // dislike
+	must(rt.favorites.add(ctx, Actor{ID: "u1"}, "gallery", "g1"))                 // favorite
 	if _, err := rt.comments.create(ctx, Actor{ID: "u1"}, "gallery", "g1", createInput{Body: "hi"}); err != nil {
 		t.Fatal(err)
 	}
-	must(rt.reactions.react(ctx, Actor{ID: "u3"}, "gallery", "g2", 1))
+	must(reactErr(rt.reactions.react(ctx, Actor{ID: "u3"}, "gallery", "g2", 1)))
 
 	c, err := rt.Counts(ctx, "gallery", "g1")
 	if err != nil {
@@ -47,7 +47,7 @@ func TestCounts_RollupAggregates(t *testing.T) {
 
 	// Unfavorite decrements; switching a reaction moves the split.
 	must(rt.favorites.remove(ctx, Actor{ID: "u1"}, "gallery", "g1"))
-	must(rt.reactions.react(ctx, Actor{ID: "u2"}, "gallery", "g1", 1)) // dislike -> like
+	must(reactErr(rt.reactions.react(ctx, Actor{ID: "u2"}, "gallery", "g1", 1))) // dislike -> like
 	c, _ = rt.Counts(ctx, "gallery", "g1")
 	if c.Favorites != 0 || c.Likes != 2 || c.Dislikes != 0 {
 		t.Fatalf("after unfavorite + switch: %+v, want favorites=0 likes=2 dislikes=0", c)

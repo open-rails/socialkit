@@ -119,26 +119,28 @@ func (r *reactions) lockExisting(ctx context.Context, tx pgx.Tx, userID, ip, ent
 
 // react is the generic entry point for host-registered entity types: it gates
 // on accessibility (no reacting on deleted/unpublished/premium-locked targets),
-// applies the reaction, and emits the discovery signal.
-func (r *reactions) react(ctx context.Context, actor Actor, entityType, entityID string, value int16) error {
-	if _, err := r.rt.gate(ctx, entityType, entityID, actor, true); err != nil {
-		return err
+// applies the reaction under the resolver's CANONICAL key, and emits the
+// discovery signal. Returns the canonical ref so callers read counts by it.
+func (r *reactions) react(ctx context.Context, actor Actor, entityType, entityID string, value int16) (EntityRef, error) {
+	ref, err := r.rt.gate(ctx, entityType, entityID, actor, true)
+	if err != nil {
+		return EntityRef{}, err
 	}
 	tx, err := r.s.pool.Begin(ctx)
 	if err != nil {
-		return err
+		return EntityRef{}, err
 	}
 	defer tx.Rollback(ctx)
-	if _, _, err := r.applyTx(ctx, tx, actor, entityType, entityID, value); err != nil {
-		return err
+	if _, _, err := r.applyTx(ctx, tx, actor, ref.Type, ref.ID, value); err != nil {
+		return EntityRef{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return err
+		return EntityRef{}, err
 	}
 	r.rt.rec.Reaction(ctx, ReactionSignal{
-		EntityType: entityType, EntityID: entityID, ActorID: actor.ID, Kind: reactionKind(value),
+		EntityType: ref.Type, EntityID: ref.ID, ActorID: actor.ID, Kind: reactionKind(value),
 	})
-	return nil
+	return ref, nil
 }
 
 // counts returns the SPLIT tally plus the caller's own reaction, on a querier
@@ -177,12 +179,12 @@ func (r *reactions) mount(mux *http.ServeMux) {
 func (r *reactions) handleSet(value int16) http.HandlerFunc {
 	return func(w http.ResponseWriter, req *http.Request) {
 		actor := r.rt.actor(req.Context())
-		entityType, entityID := req.PathValue("type"), req.PathValue("id")
-		if err := r.react(req.Context(), actor, entityType, entityID, value); err != nil {
+		ref, err := r.react(req.Context(), actor, req.PathValue("type"), req.PathValue("id"), value)
+		if err != nil {
 			writeErr(w, err)
 			return
 		}
-		cnt, err := r.counts(req.Context(), r.s.pool, actor, entityType, entityID)
+		cnt, err := r.counts(req.Context(), r.s.pool, actor, ref.Type, ref.ID)
 		if err != nil {
 			writeErr(w, err)
 			return
@@ -193,12 +195,12 @@ func (r *reactions) handleSet(value int16) http.HandlerFunc {
 
 func (r *reactions) handleGet(w http.ResponseWriter, req *http.Request) {
 	actor := r.rt.actor(req.Context())
-	entityType, entityID := req.PathValue("type"), req.PathValue("id")
-	if _, err := r.rt.gate(req.Context(), entityType, entityID, actor, false); err != nil {
+	ref, err := r.rt.gate(req.Context(), req.PathValue("type"), req.PathValue("id"), actor, false)
+	if err != nil {
 		writeErr(w, err)
 		return
 	}
-	cnt, err := r.counts(req.Context(), r.s.pool, actor, entityType, entityID)
+	cnt, err := r.counts(req.Context(), r.s.pool, actor, ref.Type, ref.ID)
 	if err != nil {
 		writeErr(w, err)
 		return

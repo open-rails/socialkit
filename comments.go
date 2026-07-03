@@ -67,9 +67,11 @@ type Comment struct {
 // replies are one level deep (a reply-to-a-reply re-parents to the top-level on
 // the client, e.g. via an @mention). The parent's reply_count is bumped in tx.
 func (c *comments) create(ctx context.Context, actor Actor, entityType, entityID string, in createInput) (Comment, error) {
-	if _, err := c.rt.gate(ctx, entityType, entityID, actor, true); err != nil {
+	ref, err := c.rt.gate(ctx, entityType, entityID, actor, true)
+	if err != nil {
 		return Comment{}, err
 	}
+	entityType, entityID = ref.Type, ref.ID // store under the canonical key
 
 	// Author identity: a logged-in actor sets user_id; an anon MUST name itself.
 	loggedIn := actor.ID != "" && !actor.Anonymous
@@ -166,14 +168,15 @@ func (c *comments) create(ctx context.Context, actor Actor, entityType, entityID
 // with reply_count so the client can lazily fetch replies. Requires the entity
 // be visible (not accessible — reading is allowed on premium-locked targets).
 func (c *comments) list(ctx context.Context, actor Actor, entityType, entityID, sort string, limit, offset int) ([]Comment, error) {
-	if _, err := c.rt.gate(ctx, entityType, entityID, actor, false); err != nil {
+	ref, err := c.rt.gate(ctx, entityType, entityID, actor, false)
+	if err != nil {
 		return nil, err
 	}
 	rows, err := c.s.pool.Query(ctx, `SELECT id::text, parent_id::text, user_id, anon_name, body, likes, dislikes, reply_count, deleted_at, created_at, updated_at
 		FROM `+c.s.t.comments+`
 		WHERE entity_type = $1 AND entity_id = $2 AND parent_id IS NULL
 		`+orderBy(sort, "likes", "dislikes", "created_at")+`
-		LIMIT $3 OFFSET $4`, entityType, entityID, limit, offset)
+		LIMIT $3 OFFSET $4`, ref.Type, ref.ID, limit, offset)
 	if err != nil {
 		return nil, err
 	}

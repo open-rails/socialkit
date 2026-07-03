@@ -29,8 +29,8 @@ type EntityKey struct {
 	ID   string `json:"entity_id"`
 }
 
-// favoriteItem is one row of the caller's wishlist (newest-first on list).
-type favoriteItem struct {
+// FavoriteItem is one row of the caller's wishlist (newest-first on list).
+type FavoriteItem struct {
 	EntityType string    `json:"entity_type"`
 	EntityID   string    `json:"entity_id"`
 	CreatedAt  time.Time `json:"created_at"`
@@ -40,9 +40,11 @@ type favoriteItem struct {
 // visible entity can be wishlisted, then idempotently inserts and emits the
 // discovery signal. Re-favoriting is a no-op success (ON CONFLICT DO NOTHING).
 func (f *favorites) add(ctx context.Context, actor Actor, entityType, entityID string) error {
-	if _, err := f.rt.gate(ctx, entityType, entityID, actor, false); err != nil {
+	ref, err := f.rt.gate(ctx, entityType, entityID, actor, false)
+	if err != nil {
 		return err
 	}
+	entityType, entityID = ref.Type, ref.ID // store under the canonical key
 	tx, err := f.s.pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -73,6 +75,9 @@ func (f *favorites) add(ctx context.Context, actor Actor, entityType, entityID s
 // and emits the unfavorite signal. No visibility gate: un-wishlisting content
 // that later became hidden must still work.
 func (f *favorites) remove(ctx context.Context, actor Actor, entityType, entityID string) error {
+	// Canonicalize when possible; falls back to the raw key so un-wishlisting
+	// content the resolver can no longer see still works.
+	entityType, entityID = f.rt.canonical(ctx, entityType, entityID, actor)
 	tx, err := f.s.pool.Begin(ctx)
 	if err != nil {
 		return err
@@ -172,7 +177,7 @@ func (f *favorites) CountsByEntity(ctx context.Context, entityType string, ids [
 }
 
 // list returns the caller's favorites, most recent first, paginated.
-func (f *favorites) list(ctx context.Context, userID string, limit, offset int) ([]favoriteItem, error) {
+func (f *favorites) list(ctx context.Context, userID string, limit, offset int) ([]FavoriteItem, error) {
 	rows, err := f.s.pool.Query(ctx, `SELECT entity_type, entity_id, created_at
 		FROM `+f.s.t.favorites+`
 		WHERE user_id = $1
@@ -182,9 +187,9 @@ func (f *favorites) list(ctx context.Context, userID string, limit, offset int) 
 		return nil, err
 	}
 	defer rows.Close()
-	items := make([]favoriteItem, 0, limit)
+	items := make([]FavoriteItem, 0, min(limit, 128)) // limit can be MaxInt32 ("all")
 	for rows.Next() {
-		var it favoriteItem
+		var it FavoriteItem
 		if err := rows.Scan(&it.EntityType, &it.EntityID, &it.CreatedAt); err != nil {
 			return nil, err
 		}
@@ -236,7 +241,7 @@ func (f *favorites) handleStatus(w http.ResponseWriter, req *http.Request) {
 		writeErr(w, err)
 		return
 	}
-	entityType, entityID := req.PathValue("type"), req.PathValue("id")
+	entityType, entityID := f.rt.canonical(req.Context(), req.PathValue("type"), req.PathValue("id"), actor)
 	key := EntityKey{Type: entityType, ID: entityID}
 	m, err := f.IsFavorited(req.Context(), actor.ID, []EntityKey{key})
 	if err != nil {

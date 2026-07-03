@@ -179,3 +179,6 @@ func (r *recordingRecorder) reactionCount() int {
 	defer r.mu.Unlock()
 	return len(r.reactions)
 }
+
+// reactErr adapts react's (ref, error) return for error-only test assertions.
+func reactErr(_ EntityRef, err error) error { return err }

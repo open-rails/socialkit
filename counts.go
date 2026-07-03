@@ -66,6 +66,21 @@ func (rt *Runtime) Counts(ctx context.Context, entityType, entityID string) (Ent
 	return c, err
 }
 
+// ListFavorites returns userID's bookmarks newest-first — the host-facing Go
+// API a hydrated host list route reads its ids from. limit <= 0 means all.
+func (rt *Runtime) ListFavorites(ctx context.Context, userID string, limit, offset int) ([]FavoriteItem, error) {
+	if limit <= 0 {
+		limit = 1<<31 - 1
+	}
+	return rt.favorites.list(ctx, userID, limit, offset)
+}
+
+// IsFavorited batch-checks bookmarks for a user (host-facing; every requested
+// key is present in the map, absent bookmarks => false).
+func (rt *Runtime) IsFavorited(ctx context.Context, userID string, targets []EntityKey) (map[EntityKey]bool, error) {
+	return rt.favorites.IsFavorited(ctx, userID, targets)
+}
+
 // CountsByEntity batch-reads aggregate counts for many ids of one entity type
 // (missing ids are absent from the map). For host list hydration + sorting.
 func (rt *Runtime) CountsByEntity(ctx context.Context, entityType string, ids []string) (map[string]EntityCounts, error) {

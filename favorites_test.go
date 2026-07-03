@@ -138,7 +138,7 @@ func TestFavorites_WishlistVisibleNotAccessible(t *testing.T) {
 		t.Fatal("status after favoriting premium-locked: want favorited")
 	}
 	// Contrast: reactions gate on accessibility, so the same target is rejected.
-	if err := rt.reactions.react(ctx, actor, "widget", "premium", 1); !errors.Is(err, ErrForbidden) {
+	if err := reactErr(rt.reactions.react(ctx, actor, "widget", "premium", 1)); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("react on premium-locked: want ErrForbidden, got %v", err)
 	}
 }

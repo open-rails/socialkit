@@ -183,7 +183,10 @@ func (rt *Runtime) isRegistered(entityType string) bool {
 
 // gate resolves a target and enforces the required access level. It returns a
 // sentinel error (ErrNotFound/ErrNotVisible/ErrForbidden) that writeErr maps to
-// status, or the resolver's own error.
+// status, or the resolver's own error. The returned ref carries the resolver's
+// CANONICAL identity (e.g. "slug-123" -> "123:en"); callers MUST store/query by
+// ref.Type/ref.ID, never the caller-supplied key, so aliases can't fragment
+// rows. A resolver that leaves Type/ID empty keeps the caller-supplied key.
 func (rt *Runtime) gate(ctx context.Context, entityType, entityID string, actor Actor, needAccessible bool) (EntityRef, error) {
 	if !entityTypeRe.MatchString(entityType) || !rt.isRegistered(entityType) {
 		return EntityRef{}, ErrNotFound
@@ -195,6 +198,12 @@ func (rt *Runtime) gate(ctx context.Context, entityType, entityID string, actor 
 	if err != nil {
 		return EntityRef{}, err
 	}
+	if ref.Type == "" {
+		ref.Type = entityType
+	}
+	if ref.ID == "" {
+		ref.ID = entityID
+	}
 	if !ref.Visible {
 		return EntityRef{}, ErrNotVisible
 	}
@@ -202,6 +211,23 @@ func (rt *Runtime) gate(ctx context.Context, entityType, entityID string, actor 
 		return EntityRef{}, ErrForbidden
 	}
 	return ref, nil
+}
+
+// canonical maps a caller-supplied key to the resolver's canonical one for
+// paths that must succeed even when the target is hidden (e.g. un-wishlisting
+// deleted content): a resolve failure falls back to the raw key.
+func (rt *Runtime) canonical(ctx context.Context, entityType, entityID string, actor Actor) (string, string) {
+	if !entityTypeRe.MatchString(entityType) || !rt.isRegistered(entityType) || entityID == "" {
+		return entityType, entityID
+	}
+	ref, err := rt.entities.Resolve(ctx, entityType, entityID, actor)
+	if err != nil || ref.ID == "" {
+		return entityType, entityID
+	}
+	if ref.Type == "" {
+		ref.Type = entityType
+	}
+	return ref.Type, ref.ID
 }
 
 // requirePerm is fail-closed: an unset perm, a denied check, or a check error
