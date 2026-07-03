@@ -296,6 +296,104 @@ func (c *comments) latest(ctx context.Context, actor Actor, limit, offset int) (
 	return kept, nil
 }
 
+// AdminComment is the moderation view: raw body (no tombstoning) + deletion
+// state + entity key.
+type AdminComment struct {
+	Comment
+	EntityType string     `json:"entity_type"`
+	EntityID   string     `json:"entity_id"`
+	DeletedAt  *time.Time `json:"deleted_at,omitempty"`
+}
+
+// adminList returns comments newest-first for moderation — INCLUDING soft-
+// deleted ones with their real bodies. Optional entity_type filter.
+func (c *comments) adminList(ctx context.Context, entityType string, limit, offset int) ([]AdminComment, error) {
+	where, args := "", []any{}
+	if entityType != "" {
+		where = `WHERE entity_type = $3`
+		args = append(args, entityType)
+	}
+	rows, err := c.s.pool.Query(ctx, `SELECT id::text, parent_id::text, user_id, anon_name, body, likes, dislikes, reply_count, deleted_at, created_at, updated_at, entity_type, entity_id
+		FROM `+c.s.t.comments+` `+where+`
+		ORDER BY created_at DESC
+		LIMIT $1 OFFSET $2`, append([]any{limit, offset}, args...)...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []AdminComment
+	var flat []Comment
+	var authorIDs []string
+	for rows.Next() {
+		var it AdminComment
+		var parentID, userID, anonName *string
+		if err := rows.Scan(&it.ID, &parentID, &userID, &anonName, &it.Body, &it.Likes, &it.Dislikes, &it.ReplyCount, &it.DeletedAt, &it.CreatedAt, &it.UpdatedAt, &it.EntityType, &it.EntityID); err != nil {
+			return nil, err
+		}
+		if parentID != nil {
+			it.ParentID = *parentID
+		}
+		if userID != nil {
+			it.UserID = *userID
+			authorIDs = append(authorIDs, *userID)
+		}
+		if anonName != nil {
+			it.AnonName = *anonName
+		}
+		it.Deleted = it.DeletedAt != nil
+		out = append(out, it)
+		flat = append(flat, it.Comment)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(out) == 0 {
+		return []AdminComment{}, nil
+	}
+	if err := c.enrichAuthors(ctx, flat, authorIDs); err != nil {
+		return nil, err
+	}
+	for i := range out {
+		out[i].Author = flat[i].Author
+	}
+	return out, nil
+}
+
+// restore un-deletes a tombstoned comment (moderator-only), re-incrementing the
+// parent's reply_count / the entity's comment_count — the inverse of softDelete.
+func (c *comments) restore(ctx context.Context, cid string) error {
+	if !uuidRe.MatchString(cid) {
+		return ErrNotFound
+	}
+	tx, err := c.s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	var parentID *string
+	var entityType, entityID string
+	err = tx.QueryRow(ctx, `UPDATE `+c.s.t.comments+`
+		SET deleted_at = NULL, updated_at = now()
+		WHERE id = $1 AND deleted_at IS NOT NULL
+		RETURNING parent_id::text, entity_type, entity_id`, cid).Scan(&parentID, &entityType, &entityID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound // missing or not deleted
+	}
+	if err != nil {
+		return err
+	}
+	if parentID != nil {
+		if _, err := tx.Exec(ctx, `UPDATE `+c.s.t.comments+`
+			SET reply_count = reply_count + 1, updated_at = now() WHERE id = $1`, *parentID); err != nil {
+			return err
+		}
+	} else if err := bumpCounts(ctx, tx, c.s, entityType, entityID, 0, 0, 0, 1); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
 // hydrate scans comment rows (tombstoning soft-deleted ones), then batch-attaches
 // authors + the caller's own reaction.
 func (c *comments) hydrate(ctx context.Context, actor Actor, rows pgx.Rows) ([]Comment, error) {
@@ -552,6 +650,8 @@ func (c *comments) mount(mux *http.ServeMux) {
 	mux.HandleFunc("GET /{type}/{id}/comments", c.handleList)
 	mux.HandleFunc("POST /{type}/{id}/comments", c.handleCreate)
 	mux.HandleFunc("GET /comments/latest", c.handleLatest) // literal beats {cid}
+	mux.HandleFunc("GET /comments/admin", c.handleAdminList)
+	mux.HandleFunc("POST /comments/{cid}/restore", c.handleRestore)
 	mux.HandleFunc("GET /comments/{cid}/replies", c.handleReplies)
 	mux.HandleFunc("PATCH /comments/{cid}", c.handleEdit)
 	mux.HandleFunc("DELETE /comments/{cid}", c.handleDelete)
@@ -569,6 +669,37 @@ func (c *comments) handleList(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, list)
+}
+
+// handleAdminList serves the moderation queue (CommentModerate-gated): all
+// comments incl. tombstones with real bodies.
+func (c *comments) handleAdminList(w http.ResponseWriter, req *http.Request) {
+	actor := c.rt.actor(req.Context())
+	if err := c.rt.requirePerm(req.Context(), actor, c.rt.perms.CommentModerate); err != nil {
+		writeErr(w, err)
+		return
+	}
+	limit, offset := parsePage(req)
+	items, err := c.adminList(req.Context(), req.URL.Query().Get("entity_type"), limit, offset)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+// handleRestore un-deletes a comment (CommentModerate-gated).
+func (c *comments) handleRestore(w http.ResponseWriter, req *http.Request) {
+	actor := c.rt.actor(req.Context())
+	if err := c.rt.requirePerm(req.Context(), actor, c.rt.perms.CommentModerate); err != nil {
+		writeErr(w, err)
+		return
+	}
+	if err := c.restore(req.Context(), req.PathValue("cid")); err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"restored": true})
 }
 
 func (c *comments) handleLatest(w http.ResponseWriter, req *http.Request) {

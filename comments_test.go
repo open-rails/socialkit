@@ -3,6 +3,8 @@ package socialkit
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"testing"
 )
@@ -333,4 +335,60 @@ func commentFeedIDs(items []FeedItem) []string {
 		ids[i] = items[i].ID
 	}
 	return ids
+}
+
+func TestComments_AdminListAndRestore(t *testing.T) {
+	rt, _ := newTestRuntime(t, Options{
+		Entities: resolverWith("gallery", "1"), EntityTypes: []string{"gallery"},
+		Authz: pollAdminOnly{}, Perms: Perms{CommentModerate: "root:comments:delete"},
+	})
+	ctx := context.Background()
+	admin, user := Actor{ID: "admin"}, Actor{ID: "user1"}
+
+	top := mustComment(t, rt, user, "gallery", "1", createInput{Body: "visible"})
+	hidden := mustComment(t, rt, user, "gallery", "1", createInput{Body: "hide me"})
+	if err := rt.comments.softDelete(ctx, admin, hidden.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Admin list shows BOTH, with the deleted one's real body + deleted flag.
+	items, err := rt.comments.adminList(ctx, "", 10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 2 {
+		t.Fatalf("admin list = %d rows, want 2", len(items))
+	}
+	var del *AdminComment
+	for i := range items {
+		if items[i].ID == hidden.ID {
+			del = &items[i]
+		}
+	}
+	if del == nil || !del.Deleted || del.Body != "hide me" || del.DeletedAt == nil {
+		t.Fatalf("deleted row wrong in admin view: %+v", del)
+	}
+
+	// Restore brings it back into the public list and re-bumps comment_count.
+	if err := rt.comments.restore(ctx, hidden.ID); err != nil {
+		t.Fatal(err)
+	}
+	pub, _ := rt.comments.list(ctx, user, "gallery", "1", "", 10, 0)
+	if len(pub) != 2 {
+		t.Fatalf("public list after restore = %d, want 2", len(pub))
+	}
+	if c, _ := rt.Counts(ctx, "gallery", "1"); c.CommentCount != 2 {
+		t.Fatalf("comment_count after restore = %d, want 2", c.CommentCount)
+	}
+	// Restoring a live comment is a 404-shaped no-op; non-admin is denied.
+	if err := rt.comments.restore(ctx, top.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("restore live: want ErrNotFound, got %v", err)
+	}
+	req := httptest.NewRequest("GET", "/comments/admin", nil)
+	req = req.WithContext(withActor(req.Context(), user))
+	rec := httptest.NewRecorder()
+	rt.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("non-admin admin list = %d, want 403", rec.Code)
+	}
 }
