@@ -444,3 +444,69 @@ func pollIDs(vs []pollView) []string {
 	}
 	return ids
 }
+
+func TestPolls_OptionCRUD(t *testing.T) {
+	rt, p := newPollTest(t, Options{Authz: pollAdminOnly{}})
+	ctx := context.Background()
+	v, err := p.create(ctx, pollAdmin, twoOptionPoll("en"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	do := func(actor Actor, method, path, body string) *httptest.ResponseRecorder {
+		t.Helper()
+		var rdr io.Reader
+		if body != "" {
+			rdr = bytes.NewBufferString(body)
+		}
+		req := httptest.NewRequest(method, path, rdr)
+		req = req.WithContext(withActor(req.Context(), actor))
+		rec := httptest.NewRecorder()
+		rt.Handler().ServeHTTP(rec, req)
+		return rec
+	}
+
+	// Add a third option; position auto-appends after the existing two.
+	rec := do(pollAdmin, "POST", "/polls/"+v.ID+"/options", `{"label":"Misato"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("add option: %d %s", rec.Code, rec.Body.String())
+	}
+	var added pollOption
+	if err := json.Unmarshal(rec.Body.Bytes(), &added); err != nil {
+		t.Fatal(err)
+	}
+	if added.Position != 2 {
+		t.Fatalf("added position = %d, want 2 (auto end-of-list)", added.Position)
+	}
+
+	// Rename it + move it to the front.
+	rec = do(pollAdmin, "PATCH", "/polls/"+v.ID+"/options/"+added.ID, `{"label":"Kaji","position":0}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("update option: %d %s", rec.Code, rec.Body.String())
+	}
+	var upd pollOption
+	_ = json.Unmarshal(rec.Body.Bytes(), &upd)
+	if upd.Label != "Kaji" || upd.Position != 0 {
+		t.Fatalf("update result = %+v", upd)
+	}
+
+	// Delete works at 3 options; the next delete would leave 1 -> refused.
+	if rec = do(pollAdmin, "DELETE", "/polls/"+v.ID+"/options/"+added.ID, ""); rec.Code != http.StatusNoContent {
+		t.Fatalf("delete option: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec = do(pollAdmin, "DELETE", "/polls/"+v.ID+"/options/"+v.Options[0].ID, ""); rec.Code != http.StatusBadRequest {
+		t.Fatalf("delete below 2 options: %d, want 400", rec.Code)
+	}
+
+	// Non-admin is denied on all three.
+	user := Actor{ID: "user1"}
+	if rec = do(user, "POST", "/polls/"+v.ID+"/options", `{"label":"x"}`); rec.Code != http.StatusForbidden {
+		t.Fatalf("non-admin add = %d, want 403", rec.Code)
+	}
+	if rec = do(user, "PATCH", "/polls/"+v.ID+"/options/"+v.Options[0].ID, `{"label":"x"}`); rec.Code != http.StatusForbidden {
+		t.Fatalf("non-admin update = %d, want 403", rec.Code)
+	}
+	if rec = do(user, "DELETE", "/polls/"+v.ID+"/options/"+v.Options[0].ID, ""); rec.Code != http.StatusForbidden {
+		t.Fatalf("non-admin delete = %d, want 403", rec.Code)
+	}
+}

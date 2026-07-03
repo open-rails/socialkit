@@ -411,7 +411,141 @@ func (p *polls) mount(mux *http.ServeMux) {
 	mux.HandleFunc("DELETE /polls/{id}", p.handleDelete)
 	mux.HandleFunc("POST /polls/{id}/vote", p.handleVote)
 	mux.HandleFunc("POST /polls/{id}/image", p.handleQuestionImage)
+	mux.HandleFunc("POST /polls/{id}/options", p.handleAddOption)
+	// Nested under the poll: a bare /polls/options/{oid} DELETE would ambiguously
+	// overlap reactions' generic DELETE /{type}/{id}/reaction in ServeMux.
+	mux.HandleFunc("PATCH /polls/{id}/options/{oid}", p.handleUpdateOption)
+	mux.HandleFunc("DELETE /polls/{id}/options/{oid}", p.handleDeleteOption)
 	mux.HandleFunc("POST /polls/options/{oid}/image", p.handleOptionImage)
+}
+
+// optionPatch is the add/update body; pointers so an absent field is untouched.
+type optionPatch struct {
+	Label    *string `json:"label"`
+	ImageURL *string `json:"image_url"`
+	Position *int    `json:"position"`
+}
+
+// handleAddOption appends an option to an existing poll. Position defaults to
+// end-of-list. PollWrite-gated.
+func (p *polls) handleAddOption(w http.ResponseWriter, req *http.Request) {
+	actor := p.rt.actor(req.Context())
+	if err := p.rt.requirePerm(req.Context(), actor, p.rt.perms.PollWrite); err != nil {
+		writeErr(w, err)
+		return
+	}
+	id := req.PathValue("id")
+	if !uuidRe.MatchString(id) {
+		writeErr(w, ErrNotFound)
+		return
+	}
+	var in optionPatch
+	if err := decodeJSON(req, &in); err != nil {
+		writeErr(w, err)
+		return
+	}
+	if in.Label == nil || strings.TrimSpace(*in.Label) == "" {
+		writeErr(w, badRequest("label is required"))
+		return
+	}
+	var o pollOption
+	err := p.s.pool.QueryRow(req.Context(), `INSERT INTO `+p.s.t.pollOptions+`
+		(question_id, label, image_url, position)
+		SELECT q.id, $2, $3, COALESCE($4, (SELECT COALESCE(MAX(position)+1, 0) FROM `+p.s.t.pollOptions+` WHERE question_id = q.id))
+		FROM `+p.s.t.pollQuestions+` q WHERE q.id = $1 AND q.deleted_at IS NULL
+		RETURNING id::text, label, coalesce(image_url,''), position, vote_count`,
+		id, strings.TrimSpace(*in.Label), in.ImageURL, in.Position).
+		Scan(&o.ID, &o.Label, &o.ImageURL, &o.Position, &o.VoteCount)
+	if errors.Is(err, pgx.ErrNoRows) { // poll missing/deleted
+		writeErr(w, ErrNotFound)
+		return
+	}
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	o.ImageURL = p.rt.absMediaURL(o.ImageURL)
+	writeJSON(w, http.StatusCreated, o)
+}
+
+// handleUpdateOption edits an option's label/image/position. PollWrite-gated.
+func (p *polls) handleUpdateOption(w http.ResponseWriter, req *http.Request) {
+	actor := p.rt.actor(req.Context())
+	if err := p.rt.requirePerm(req.Context(), actor, p.rt.perms.PollWrite); err != nil {
+		writeErr(w, err)
+		return
+	}
+	pollID, oid := req.PathValue("id"), req.PathValue("oid")
+	if !uuidRe.MatchString(pollID) || !uuidRe.MatchString(oid) {
+		writeErr(w, ErrNotFound)
+		return
+	}
+	var in optionPatch
+	if err := decodeJSON(req, &in); err != nil {
+		writeErr(w, err)
+		return
+	}
+	if in.Label != nil {
+		l := strings.TrimSpace(*in.Label)
+		if l == "" {
+			writeErr(w, badRequest("label cannot be blank"))
+			return
+		}
+		in.Label = &l
+	}
+	var o pollOption
+	err := p.s.pool.QueryRow(req.Context(), `UPDATE `+p.s.t.pollOptions+`
+		SET label = COALESCE($2, label), image_url = COALESCE($3, image_url), position = COALESCE($4, position)
+		WHERE id = $1 AND question_id = $5
+		RETURNING id::text, label, coalesce(image_url,''), position, vote_count`,
+		oid, in.Label, in.ImageURL, in.Position, pollID).
+		Scan(&o.ID, &o.Label, &o.ImageURL, &o.Position, &o.VoteCount)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeErr(w, ErrNotFound)
+		return
+	}
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	o.ImageURL = p.rt.absMediaURL(o.ImageURL)
+	writeJSON(w, http.StatusOK, o)
+}
+
+// handleDeleteOption removes an option (its votes cascade). Refuses to shrink a
+// poll below 2 options — that would break voting. PollWrite-gated.
+func (p *polls) handleDeleteOption(w http.ResponseWriter, req *http.Request) {
+	actor := p.rt.actor(req.Context())
+	if err := p.rt.requirePerm(req.Context(), actor, p.rt.perms.PollWrite); err != nil {
+		writeErr(w, err)
+		return
+	}
+	pollID, oid := req.PathValue("id"), req.PathValue("oid")
+	if !uuidRe.MatchString(pollID) || !uuidRe.MatchString(oid) {
+		writeErr(w, ErrNotFound)
+		return
+	}
+	// Single statement: delete only when >= 3 siblings exist, so a poll never
+	// shrinks below 2 votable options.
+	tag, err := p.s.pool.Exec(req.Context(), `DELETE FROM `+p.s.t.pollOptions+` o
+		WHERE o.id = $1 AND o.question_id = $2 AND (
+			SELECT count(*) FROM `+p.s.t.pollOptions+` s WHERE s.question_id = $2) >= 3`, oid, pollID)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	if tag.RowsAffected() == 0 {
+		// Missing option and too-few-options both land here; disambiguate.
+		var exists bool
+		if err := p.s.pool.QueryRow(req.Context(), `SELECT true FROM `+p.s.t.pollOptions+`
+			WHERE id = $1 AND question_id = $2`, oid, pollID).Scan(&exists); err == nil && exists {
+			writeErr(w, badRequest("a poll needs at least 2 options"))
+			return
+		}
+		writeErr(w, ErrNotFound)
+		return
+	}
+	writeJSON(w, http.StatusNoContent, nil)
 }
 
 // handleQuestionImage uploads a question-level image and stores its public URL.
