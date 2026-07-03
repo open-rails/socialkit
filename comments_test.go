@@ -285,3 +285,52 @@ func commentIDs(list []Comment) []string {
 	}
 	return ids
 }
+
+func TestComments_LatestFeed(t *testing.T) {
+	res := &fakeResolver{}
+	res.set("gallery", "1", true, true)
+	res.set("gallery", "2", true, true)
+	rt, _ := newTestRuntime(t, Options{Entities: res, EntityTypes: []string{"gallery"}, Users: commentsEnricher{}})
+	ctx := context.Background()
+	a := Actor{ID: "author"}
+
+	c1 := mustComment(t, rt, a, "gallery", "1", createInput{Body: "on g1"})
+	c2 := mustComment(t, rt, a, "gallery", "2", createInput{Body: "on g2"})
+	gone := mustComment(t, rt, a, "gallery", "1", createInput{Body: "deleted later"})
+	if err := rt.comments.softDelete(ctx, a, gone.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	feed, err := rt.comments.latest(ctx, a, 10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Tombstone excluded; newest-first across entities; entity keys + author present.
+	if len(feed) != 2 || feed[0].ID != c2.ID || feed[1].ID != c1.ID {
+		t.Fatalf("feed = %+v, want [c2, c1]", feed)
+	}
+	if feed[0].EntityType != "gallery" || feed[0].EntityID != "2" {
+		t.Fatalf("feed[0] entity = %s/%s, want gallery/2", feed[0].EntityType, feed[0].EntityID)
+	}
+	if feed[0].Author == nil || feed[0].Author.Username != "name-author" {
+		t.Fatalf("feed author not enriched: %+v", feed[0].Author)
+	}
+
+	// Hiding g2 drops its comments from the feed.
+	res.set("gallery", "2", false, false)
+	feed, err = rt.comments.latest(ctx, a, 10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(feed) != 1 || feed[0].ID != c1.ID {
+		t.Fatalf("feed after hide = %v, want [c1]", commentFeedIDs(feed))
+	}
+}
+
+func commentFeedIDs(items []FeedItem) []string {
+	ids := make([]string, len(items))
+	for i := range items {
+		ids[i] = items[i].ID
+	}
+	return ids
+}

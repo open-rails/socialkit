@@ -210,6 +210,92 @@ func (c *comments) replies(ctx context.Context, actor Actor, parentID string, li
 	return c.hydrate(ctx, actor, rows)
 }
 
+// FeedItem is a Comment plus its target's canonical key, for the cross-entity
+// latest feed (hosts hydrate titles/covers from the key).
+type FeedItem struct {
+	Comment
+	EntityType string `json:"entity_type"`
+	EntityID   string `json:"entity_id"`
+}
+
+// latest returns the newest comments across ALL entities (tombstones excluded),
+// dropping ones whose target the resolver no longer shows to this actor — so a
+// page may under-fill; clients page by offset regardless. Each DISTINCT entity
+// costs one resolver call per page.
+func (c *comments) latest(ctx context.Context, actor Actor, limit, offset int) ([]FeedItem, error) {
+	rows, err := c.s.pool.Query(ctx, `SELECT id::text, parent_id::text, user_id, anon_name, body, likes, dislikes, reply_count, deleted_at, created_at, updated_at, entity_type, entity_id
+		FROM `+c.s.t.comments+`
+		WHERE deleted_at IS NULL
+		ORDER BY created_at DESC
+		LIMIT $1 OFFSET $2`, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var items []FeedItem
+	for rows.Next() {
+		var it FeedItem
+		var parentID, userID, anonName *string
+		var deletedAt *time.Time
+		if err := rows.Scan(&it.ID, &parentID, &userID, &anonName, &it.Body, &it.Likes, &it.Dislikes, &it.ReplyCount, &deletedAt, &it.CreatedAt, &it.UpdatedAt, &it.EntityType, &it.EntityID); err != nil {
+			return nil, err
+		}
+		if parentID != nil {
+			it.ParentID = *parentID
+		}
+		if userID != nil {
+			it.UserID = *userID
+		}
+		if anonName != nil {
+			it.AnonName = *anonName
+		}
+		items = append(items, it)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Drop comments on entities the actor can't see (batched per distinct key).
+	visible := map[[2]string]bool{}
+	for _, it := range items {
+		k := [2]string{it.EntityType, it.EntityID}
+		if _, done := visible[k]; done {
+			continue
+		}
+		_, err := c.rt.gate(ctx, it.EntityType, it.EntityID, actor, false)
+		visible[k] = err == nil
+	}
+	kept := items[:0]
+	var flat []Comment
+	for _, it := range items {
+		if visible[[2]string{it.EntityType, it.EntityID}] {
+			kept = append(kept, it)
+			flat = append(flat, it.Comment)
+		}
+	}
+	if len(kept) == 0 {
+		return []FeedItem{}, nil
+	}
+
+	var authorIDs []string
+	for i := range flat {
+		if flat[i].UserID != "" {
+			authorIDs = append(authorIDs, flat[i].UserID)
+		}
+	}
+	if err := c.enrichAuthors(ctx, flat, authorIDs); err != nil {
+		return nil, err
+	}
+	if err := c.attachMine(ctx, actor, flat); err != nil {
+		return nil, err
+	}
+	for i := range kept {
+		kept[i].Comment = flat[i]
+	}
+	return kept, nil
+}
+
 // hydrate scans comment rows (tombstoning soft-deleted ones), then batch-attaches
 // authors + the caller's own reaction.
 func (c *comments) hydrate(ctx context.Context, actor Actor, rows pgx.Rows) ([]Comment, error) {
@@ -465,6 +551,7 @@ func (c *comments) reactTx(ctx context.Context, actor Actor, cid string, value i
 func (c *comments) mount(mux *http.ServeMux) {
 	mux.HandleFunc("GET /{type}/{id}/comments", c.handleList)
 	mux.HandleFunc("POST /{type}/{id}/comments", c.handleCreate)
+	mux.HandleFunc("GET /comments/latest", c.handleLatest) // literal beats {cid}
 	mux.HandleFunc("GET /comments/{cid}/replies", c.handleReplies)
 	mux.HandleFunc("PATCH /comments/{cid}", c.handleEdit)
 	mux.HandleFunc("DELETE /comments/{cid}", c.handleDelete)
@@ -482,6 +569,17 @@ func (c *comments) handleList(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, list)
+}
+
+func (c *comments) handleLatest(w http.ResponseWriter, req *http.Request) {
+	actor := c.rt.actor(req.Context())
+	limit, offset := parsePage(req)
+	items, err := c.latest(req.Context(), actor, limit, offset)
+	if err != nil {
+		writeErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, items)
 }
 
 func (c *comments) handleReplies(w http.ResponseWriter, req *http.Request) {
