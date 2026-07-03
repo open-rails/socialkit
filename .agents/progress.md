@@ -349,9 +349,9 @@ Mostly deletion of hentai0's inline code + implementing the ports; hentai0 GAINS
 - [ ] Drop tables `comment_reactions`, `blog_post_reactions`, `user_entity_reactions`. **Do NOT touch `video_reactions` / `VideoReactionService` / the `repository/video.go` reaction path — deferred to #12.**
 
 **Comments:**
-- [ ] Backfill `hentai0.comments` (map `video_i18n_id`→`("video",uuid)`, `blog_post_id`→`("blog_post",id)`) → `social_comments`; cut over.
-- [ ] DELETE the inline CRUD in `internal/api/comments.go` (create/update/delete/getVideoComments/listCommentFeed/getLatestComments/feed handlers + `commentListItem`/`commentFeedResponse` DTOs); `getPostComments` in `internal/api/posts.go`; admin moderation `internal/api/admin_comments.go`; `internal/domain/comment_model.go`.
-- [ ] Drop table `comments`.
+- [x] Backfill `hentai0.comments` → `social_comments`; cut over. (011 migration, executed+asserted on scratch PG; keys `("video","<id>:<lang>")` via videos_i18n + `("post","<id>")`; thin host feed route preserves the /comments/latest page shape; admin UI on socialkit's /comments/admin + restore; hentai0 branch @ 2e975904)
+- [x] DELETE the inline CRUD in `internal/api/comments.go` (+ feed/admin handlers, `domain/comment_model.go`, CommentReactionService/repo, comment rate buckets). (+960/−2789)
+- [ ] Drop table `comments` (+ `comment_reactions`) — pairs with the #19 importer retarget (in flight).
 
 **Blog (posts):**
 - [ ] Backfill `hentai0.blog_posts` → `social_posts`; cut over.
