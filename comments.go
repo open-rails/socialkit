@@ -496,16 +496,22 @@ func (c *comments) attachMine(ctx context.Context, actor Actor, list []Comment) 
 	return nil
 }
 
-// edit re-sanitizes and updates a comment's body. Allowed for the owner or a
-// moderator (CommentModerate). 404 if missing or soft-deleted.
+// edit re-moderates, re-sanitizes, and updates a comment's body. Allowed for
+// the owner or a moderator (CommentModerate). 404 if missing or soft-deleted.
 func (c *comments) edit(ctx context.Context, actor Actor, cid, rawBody string) (Comment, error) {
-	if _, err := c.loadForWrite(ctx, actor, cid); err != nil {
+	target, err := c.loadForWrite(ctx, actor, cid)
+	if err != nil {
 		return Comment{}, err
 	}
 
 	body := strings.TrimSpace(rawBody)
 	if body == "" {
 		return Comment{}, badRequest("body is required")
+	}
+	// Same moderation gate as create: without it, an edit is a bypass — post an
+	// innocuous comment, then rewrite it to content create would have rejected.
+	if err := c.rt.mod.Check(ctx, ModerationInput{Actor: actor, EntityType: target.entityType, EntityID: target.entityID, Text: body}); err != nil {
+		return Comment{}, err
 	}
 	clean, err := c.rt.content.Sanitize(ctx, body)
 	if err != nil {
@@ -577,30 +583,38 @@ func (c *comments) softDelete(ctx context.Context, actor Actor, cid string) erro
 	return tx.Commit(ctx)
 }
 
+// writeTarget is what loadForWrite resolves: the comment's owner (nil for an
+// anonymous comment) and the entity it belongs to (for re-moderation on edit).
+type writeTarget struct {
+	ownerID              *string
+	entityType, entityID string
+}
+
 // loadForWrite resolves a live comment and authorizes actor as owner-or-moderator.
-func (c *comments) loadForWrite(ctx context.Context, actor Actor, cid string) (ownerID *string, err error) {
+func (c *comments) loadForWrite(ctx context.Context, actor Actor, cid string) (writeTarget, error) {
 	if !uuidRe.MatchString(cid) {
-		return nil, ErrNotFound
+		return writeTarget{}, ErrNotFound
 	}
+	var t writeTarget
 	var deletedAt *time.Time
-	row := c.s.pool.QueryRow(ctx, `SELECT user_id, deleted_at FROM `+c.s.t.comments+` WHERE id = $1`, cid)
-	if err := row.Scan(&ownerID, &deletedAt); err != nil {
+	row := c.s.pool.QueryRow(ctx, `SELECT user_id, entity_type, entity_id, deleted_at FROM `+c.s.t.comments+` WHERE id = $1`, cid)
+	if err := row.Scan(&t.ownerID, &t.entityType, &t.entityID, &deletedAt); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return nil, ErrNotFound
+			return writeTarget{}, ErrNotFound
 		}
-		return nil, err
+		return writeTarget{}, err
 	}
 	if deletedAt != nil {
-		return nil, ErrNotFound
+		return writeTarget{}, ErrNotFound
 	}
 	// Owner may write their own; otherwise require the moderator permission.
-	if ownerID != nil && actor.ID != "" && !actor.Anonymous && actor.ID == *ownerID {
-		return ownerID, nil
+	if t.ownerID != nil && actor.ID != "" && !actor.Anonymous && actor.ID == *t.ownerID {
+		return t, nil
 	}
 	if err := c.rt.requirePerm(ctx, actor, c.rt.perms.CommentModerate); err != nil {
-		return nil, err
+		return writeTarget{}, err
 	}
-	return ownerID, nil
+	return t, nil
 }
 
 // reactTx writes the caller's reaction to a comment and denormalizes the split

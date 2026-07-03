@@ -133,6 +133,34 @@ func TestComments_ModerationRejectsLinks(t *testing.T) {
 	}
 }
 
+// Edit runs the same moderation gate as create — without it, a user could post
+// an innocuous comment and rewrite it to content create would have rejected.
+func TestComments_EditIsModerated(t *testing.T) {
+	rt := commentsRuntime(t, Options{})
+	ctx := context.Background()
+	author := Actor{ID: "author"}
+	cm := mustComment(t, rt, author, "gallery", "1", createInput{Body: "perfectly fine"})
+
+	// A clean owner edit still goes through.
+	if _, err := rt.comments.edit(ctx, author, cm.ID, "still fine, just clearer"); err != nil {
+		t.Fatalf("clean edit rejected: %v", err)
+	}
+	// An edit to policy-violating content (a link) is a moderation rejection.
+	_, err := rt.comments.edit(ctx, author, cm.ID, "now visit https://spam.example")
+	var me moderationError
+	if !errors.As(err, &me) {
+		t.Fatalf("want moderation rejection on edit, got %v", err)
+	}
+	// The rejected edit must not have changed the stored body.
+	top, err := rt.comments.list(ctx, author, "gallery", "1", "", 10, 0)
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	if len(top) != 1 || top[0].Body != "still fine, just clearer" {
+		t.Fatalf("body after rejected edit = %+v, want the last clean body", top)
+	}
+}
+
 func TestComments_AnonRequiresName(t *testing.T) {
 	rt := commentsRuntime(t, Options{})
 	ctx := context.Background()
