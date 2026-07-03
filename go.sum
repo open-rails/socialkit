@@ -137,6 +137,8 @@ github.com/moby/term v0.5.2/go.mod h1:d3djjFCrjnB+fl8NJux+EJzu0msscUP+f8it8hPkFL
 github.com/montanaflynn/stats v0.0.0-20171201202039-1bf9dbcd8cbe/go.mod h1:wL8QJuTMNUDYhXwkmfOly8iTdp5TEcJFWZD2D7SIkUc=
 github.com/open-rails/migratekit v1.2.0 h1:5UcslJmg4k0/lav0wPKuxevPhKvfS7se8IOWqgHtpeY=
 github.com/open-rails/migratekit v1.2.0/go.mod h1:FmXhq5556xhvcDHx1wP3rNH1UBv408GHrxLw9gWXn6k=
+github.com/open-rails/migratekit v1.3.0 h1:Gf24VrBsayPESjF1gWBgVvkPhVMziQJ86LhNT/GJWus=
+github.com/open-rails/migratekit v1.3.0/go.mod h1:FmXhq5556xhvcDHx1wP3rNH1UBv408GHrxLw9gWXn6k=
 github.com/opencontainers/go-digest v1.0.0 h1:apOUWs51W5PlhuyGyz9FCeeBIOUDA/6nW8Oi/yOhh5U=
 github.com/opencontainers/go-digest v1.0.0/go.mod h1:0JzlMkj0TRzQZfJkVvzbP0HBR3IKzErnv2BNG4W4MAM=
 github.com/opencontainers/image-spec v1.1.1 h1:y0fUlFfIZhPF1W537XOLg0/fcx6zcHCJwooC2xJA040=
