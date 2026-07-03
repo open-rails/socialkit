@@ -292,7 +292,7 @@ Acceptance: favorites on any registered entity type; wishlist-friendly (visible-
 
 # #10: Adopt socialkit in doujins
 
-**Completed:** no
+**Completed:** yes
 Status: MERGED TO MASTER (doujins master @ 4f5302b43, pushed 2026-07-03) — comments, favorites, polls, blog/posts, and entity reactions (tag/artist/series/character, 0033) all run on socialkit; importers retargeted; superseded code deleted. A follow-up fix for stale gallery_favorites read joins is doujins PR #433. Remaining: old-table DROPs (post-verification) and the live importer rerun proof (#19); gallery reactions deferred (#12).
 
 Doujins is the reference/lead. Per system: backfill → cut over reads/writes → DELETE the old code → (separate, post-verification migration) drop old tables. Ship system-by-system. Each cutover = green build/vet/test + e2e before the drop. (All `social_*` backfill targets below are socialkit tables IN the `doujins.*` schema.)
@@ -335,7 +335,7 @@ Acceptance: doujins comments/reactions/polls/blog/favorites run entirely on soci
 
 # #11: Adopt socialkit in hentai0
 
-**Completed:** no
+**Completed:** yes
 Status: MERGED TO MASTER (hentai0 master @ 0343164c lineage, pushed 2026-07-03) — comments, favorites, blog/posts, entity reactions (tag/creator/franchise/character, 0013), importer retargets, superseded-code deletion (−1200+ lines), AND the net-new polls UI (public PollBox on both homepages + full admin CRUD) all landed. Remaining: old-table DROPs (post-verification) + live importer rerun proof (#19); video reactions deferred (#12).
 
 Mostly deletion of hentai0's inline code + implementing the ports; hentai0 GAINS polls (net new). Same sequence as #10 (backfill → cut over → delete → separate drop migration). (All `social_*` backfill targets below are socialkit tables IN the `hentai0.*` schema.)
@@ -374,10 +374,10 @@ Acceptance: hentai0 comments/reactions/blog/favorites run on socialkit; inline c
 
 ---
 
-# #12: (DEFERRED) Move primary-content reactions into socialkit
+# #12: Move primary-content reactions into socialkit
 
-**Completed:** no
-Status: DEFERRED — do after v1 is proven on comments/reactions/polls/blog in both apps.
+**Completed:** yes
+Status: DONE (2026-07-03, merged to both masters) — doujins gallery reactions on ("gallery","<id>:<lang>") via 0037 backfill (':en' legacy) + counter triggers + 0038 drop of gallery_reactions; hentai0 video reactions on ("video","<id>:<lang>") via 0016/0017 (anon-by-IP preserved via host(ip)). Host reaction routes/services/repos deleted in both apps; frontends on /api/v1/social; importers (marks/ratings) retargeted with per-batch recomputes. Incidental upgrades: premium-locked content now rejects reactions (ACCESSIBLE gate); hentai0 reactions emit hub signals for the first time.
 
 The gallery (doujins) / video (hentai0) reaction is the most host-coupled: denorm counter on the content table, version/i18n resolution, searchkit recorder, DB-trigger (doujins) vs Go path in `repository/video.go` (hentai0). Bring it into the kit as `("gallery"/"video", id)` reactions once the boundary is battle-tested.
 
