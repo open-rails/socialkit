@@ -76,6 +76,37 @@ func TestCounts_CommentCountLifecycle(t *testing.T) {
 	}
 }
 
+// Wilson "best": 9-likes/1-dislike must outrank 1-like/0-dislike (quality with
+// volume beats a single vote), and both outrank a no-vote comment.
+func TestComments_SortByBest(t *testing.T) {
+	rt := commentsRuntime(t, Options{})
+	ctx := context.Background()
+	a := Actor{ID: "author"}
+	small := mustComment(t, rt, a, "gallery", "1", createInput{Body: "1/0"})
+	big := mustComment(t, rt, a, "gallery", "1", createInput{Body: "9/1"})
+	none := mustComment(t, rt, a, "gallery", "1", createInput{Body: "0/0"})
+
+	if _, err := rt.comments.reactTx(ctx, Actor{ID: "v0"}, small.ID, 1); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 9; i++ {
+		if _, err := rt.comments.reactTx(ctx, Actor{ID: "u" + string(rune('a'+i))}, big.ID, 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := rt.comments.reactTx(ctx, Actor{ID: "hater"}, big.ID, -1); err != nil {
+		t.Fatal(err)
+	}
+
+	top, err := rt.comments.list(ctx, a, "gallery", "1", "best", 10, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(top) != 3 || top[0].ID != big.ID || top[1].ID != small.ID || top[2].ID != none.ID {
+		t.Fatalf("sort=best order = %v, want [9/1, 1/0, 0/0]", commentIDs(top))
+	}
+}
+
 func TestComments_SortByLikes(t *testing.T) {
 	rt := commentsRuntime(t, Options{})
 	ctx := context.Background()
