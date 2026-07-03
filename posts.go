@@ -301,7 +301,7 @@ func (p *posts) handleList(w http.ResponseWriter, req *http.Request) {
 		WHERE p.deleted_at IS NULL AND p.is_draft = false
 		AND (p.live_at IS NULL OR p.live_at <= now())
 		AND ($1 = '' OR p.language = $1)
-		ORDER BY COALESCE(p.live_at, p.created_at) DESC
+		`+orderBy(q.Get("sort"), "p.total_likes", "p.total_dislikes", "COALESCE(p.live_at, p.created_at)")+`
 		LIMIT $2 OFFSET $3`, language, limit, offset)
 	if err != nil {
 		writeErr(w, err)

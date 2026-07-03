@@ -145,6 +145,10 @@ func (c *comments) create(ctx context.Context, actor Actor, entityType, entityID
 		if _, err := tx.Exec(ctx, `UPDATE `+c.s.t.comments+` SET reply_count = reply_count + 1, updated_at = now() WHERE id = $1`, parentArg); err != nil {
 			return Comment{}, err
 		}
+	} else { // a top-level comment bumps the entity's comment_count rollup
+		if err := bumpCounts(ctx, tx, c.s, entityType, entityID, 0, 0, 0, 1); err != nil {
+			return Comment{}, err
+		}
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return Comment{}, err
@@ -161,14 +165,14 @@ func (c *comments) create(ctx context.Context, actor Actor, entityType, entityID
 // list returns the entity's TOP-LEVEL comments, newest-first and paginated, each
 // with reply_count so the client can lazily fetch replies. Requires the entity
 // be visible (not accessible — reading is allowed on premium-locked targets).
-func (c *comments) list(ctx context.Context, actor Actor, entityType, entityID string, limit, offset int) ([]Comment, error) {
+func (c *comments) list(ctx context.Context, actor Actor, entityType, entityID, sort string, limit, offset int) ([]Comment, error) {
 	if _, err := c.rt.gate(ctx, entityType, entityID, actor, false); err != nil {
 		return nil, err
 	}
 	rows, err := c.s.pool.Query(ctx, `SELECT id::text, parent_id::text, user_id, anon_name, body, likes, dislikes, reply_count, deleted_at, created_at, updated_at
 		FROM `+c.s.t.comments+`
 		WHERE entity_type = $1 AND entity_id = $2 AND parent_id IS NULL
-		ORDER BY created_at DESC
+		`+orderBy(sort, "likes", "dislikes", "created_at")+`
 		LIMIT $3 OFFSET $4`, entityType, entityID, limit, offset)
 	if err != nil {
 		return nil, err
@@ -362,19 +366,24 @@ func (c *comments) softDelete(ctx context.Context, actor Actor, cid string) erro
 	defer tx.Rollback(ctx)
 
 	var parentID *string
+	var entityType, entityID string
 	err = tx.QueryRow(ctx, `UPDATE `+c.s.t.comments+`
 		SET deleted_at = now(), updated_at = now()
 		WHERE id = $1 AND deleted_at IS NULL
-		RETURNING parent_id::text`, cid).Scan(&parentID)
+		RETURNING parent_id::text, entity_type, entity_id`, cid).Scan(&parentID, &entityType, &entityID)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil // already deleted; nothing to do
 	}
 	if err != nil {
 		return err
 	}
-	if parentID != nil {
+	if parentID != nil { // a reply → the parent has one fewer reply
 		if _, err := tx.Exec(ctx, `UPDATE `+c.s.t.comments+`
 			SET reply_count = GREATEST(reply_count - 1, 0), updated_at = now() WHERE id = $1`, *parentID); err != nil {
+			return err
+		}
+	} else { // a top-level comment → the entity has one fewer comment
+		if err := bumpCounts(ctx, tx, c.s, entityType, entityID, 0, 0, 0, -1); err != nil {
 			return err
 		}
 	}
@@ -464,7 +473,7 @@ func (c *comments) mount(mux *http.ServeMux) {
 func (c *comments) handleList(w http.ResponseWriter, req *http.Request) {
 	actor := c.rt.actor(req.Context())
 	limit, offset := parsePage(req)
-	list, err := c.list(req.Context(), actor, req.PathValue("type"), req.PathValue("id"), limit, offset)
+	list, err := c.list(req.Context(), actor, req.PathValue("type"), req.PathValue("id"), req.URL.Query().Get("sort"), limit, offset)
 	if err != nil {
 		writeErr(w, err)
 		return

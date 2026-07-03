@@ -132,6 +132,38 @@ CREATE UNIQUE INDEX social_posts_slug_uq
     ON social_posts (slug) WHERE slug IS NOT NULL AND deleted_at IS NULL;
 
 -- ----------------------------------------------------------------------------
+-- Per-entity aggregate rollup: one row per (entity_type, entity_id) with the
+-- denormalized counts, maintained IN-TX by the reaction / favorite / comment
+-- write paths. Lets any host read an item's counts O(1) and sort many items by
+-- them (galleries by likes/favorites/comments). Source tables stay authoritative
+-- so a one-shot recompute can always rebuild this (see #20).
+-- ----------------------------------------------------------------------------
+CREATE TABLE social_entity_counts (
+    entity_type   text        NOT NULL,
+    entity_id     text        NOT NULL,
+    likes         int         NOT NULL DEFAULT 0,
+    dislikes      int         NOT NULL DEFAULT 0,
+    favorites     int         NOT NULL DEFAULT 0,
+    comment_count int         NOT NULL DEFAULT 0,
+    updated_at    timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (entity_type, entity_id)
+);
+-- Sort a type's items by a count (DESC), only over rows that have any.
+CREATE INDEX social_entity_counts_likes_idx     ON social_entity_counts (entity_type, likes DESC)         WHERE likes > 0;
+CREATE INDEX social_entity_counts_favorites_idx ON social_entity_counts (entity_type, favorites DESC)     WHERE favorites > 0;
+CREATE INDEX social_entity_counts_comments_idx  ON social_entity_counts (entity_type, comment_count DESC) WHERE comment_count > 0;
+-- "Best" = Wilson lower bound on likes vs (likes+dislikes): ranks a 900/1000
+-- above a 1/1, cheaply, via an immutable expression index. 0 when no votes.
+CREATE INDEX social_entity_counts_best_idx ON social_entity_counts (
+    entity_type,
+    (CASE WHEN likes + dislikes = 0 THEN 0::float8 ELSE
+        ((likes + 1.9208) / (likes + dislikes)
+         - 1.96 * sqrt((likes::float8 * dislikes) / (likes + dislikes) + 0.9604) / (likes + dislikes))
+        / (1 + 3.8416 / (likes + dislikes))
+     END) DESC
+) WHERE likes + dislikes > 0;
+
+-- ----------------------------------------------------------------------------
 -- Favorites: user-only bookmark (no anon). Separate from reactions (favorites
 -- = unsigned presence; reactions = signed ±1, anon-capable). No denormalized
 -- count column — the host decides denormalization.

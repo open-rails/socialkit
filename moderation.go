@@ -25,16 +25,16 @@ func rejectModeration(reason string) error { return moderationError{reason: reas
 // fine for a single process; a host running many replicas that needs global
 // dedup wires its own Moderation backed by Redis.
 type DefaultModeration struct {
-	AllowLinks   bool          // default false: reject bodies containing URLs
-	DupWindow    time.Duration // default 30s: reject identical (actor,text) within window; 0 disables
-	CensorWords  []string      // default a tiny set; matched case-insensitively as whole words
-	linkRe       *regexp.Regexp
-	censorRe     *regexp.Regexp
-	initOnce     sync.Once
-	mu           sync.Mutex
-	recent       map[string]time.Time // key: actor|hash(text)
-	lastSweep    time.Time
-	nowFn        func() time.Time // injectable clock for tests
+	AllowLinks  bool          // default false: reject bodies containing URLs
+	DupWindow   time.Duration // default 30s: reject identical (actor,text) within window; 0 disables
+	CensorWords []string      // default a tiny set; matched case-insensitively as whole words
+	linkRe      *regexp.Regexp
+	censorRe    *regexp.Regexp
+	initOnce    sync.Once
+	mu          sync.Mutex
+	recent      map[string]time.Time // key: actor|hash(text)
+	lastSweep   time.Time
+	nowFn       func() time.Time // injectable clock for tests
 }
 
 var defaultCensor = []string{"childporn", "cp"}

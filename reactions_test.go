@@ -62,8 +62,8 @@ func TestReactions_ConcurrentDoubleLikeIsExact(t *testing.T) {
 
 func TestReactions_GatingRejectsInaccessibleAndMissing(t *testing.T) {
 	res := &fakeResolver{}
-	res.set("widget", "locked", true, false)   // visible but premium-locked
-	res.set("widget", "hidden", false, false)  // unpublished/deleted
+	res.set("widget", "locked", true, false)  // visible but premium-locked
+	res.set("widget", "hidden", false, false) // unpublished/deleted
 	rt, _ := newTestRuntime(t, Options{Entities: res, EntityTypes: []string{"widget"}})
 	ctx := context.Background()
 	actor := Actor{ID: "u1", Kind: "user"}

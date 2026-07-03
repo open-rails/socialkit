@@ -2,9 +2,12 @@ package socialkit
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 )
 
 // favorites is the user-only bookmark (wishlist): an unsigned presence over the
@@ -40,10 +43,24 @@ func (f *favorites) add(ctx context.Context, actor Actor, entityType, entityID s
 	if _, err := f.rt.gate(ctx, entityType, entityID, actor, false); err != nil {
 		return err
 	}
-	if _, err := f.s.pool.Exec(ctx, `INSERT INTO `+f.s.t.favorites+`
+	tx, err := f.s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	tag, err := tx.Exec(ctx, `INSERT INTO `+f.s.t.favorites+`
 		(user_id, entity_type, entity_id) VALUES ($1, $2, $3)
 		ON CONFLICT (user_id, entity_type, entity_id) DO NOTHING`,
-		actor.ID, entityType, entityID); err != nil {
+		actor.ID, entityType, entityID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 1 { // only a real new favorite bumps the rollup
+		if err := bumpCounts(ctx, tx, f.s, entityType, entityID, 0, 0, 1, 0); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return err
 	}
 	f.rt.rec.Reaction(ctx, ReactionSignal{
@@ -56,9 +73,23 @@ func (f *favorites) add(ctx context.Context, actor Actor, entityType, entityID s
 // and emits the unfavorite signal. No visibility gate: un-wishlisting content
 // that later became hidden must still work.
 func (f *favorites) remove(ctx context.Context, actor Actor, entityType, entityID string) error {
-	if _, err := f.s.pool.Exec(ctx, `DELETE FROM `+f.s.t.favorites+`
+	tx, err := f.s.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	tag, err := tx.Exec(ctx, `DELETE FROM `+f.s.t.favorites+`
 		WHERE user_id = $1 AND entity_type = $2 AND entity_id = $3`,
-		actor.ID, entityType, entityID); err != nil {
+		actor.ID, entityType, entityID)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 1 { // only a real removal decrements the rollup
+		if err := bumpCounts(ctx, tx, f.s, entityType, entityID, 0, 0, -1, 0); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return err
 	}
 	f.rt.rec.Reaction(ctx, ReactionSignal{
@@ -103,12 +134,15 @@ func (f *favorites) IsFavorited(ctx context.Context, userID string, targets []En
 	return out, rows.Err()
 }
 
-// Count returns how many users have favorited one entity — computed on read (no
-// denormalized count column imposed on the host).
+// Count returns how many users have favorited one entity — an O(1) read of the
+// per-entity rollup (maintained in-tx on add/remove).
 func (f *favorites) Count(ctx context.Context, entityType, entityID string) (int, error) {
 	var n int
-	err := f.s.pool.QueryRow(ctx, `SELECT count(*) FROM `+f.s.t.favorites+`
+	err := f.s.pool.QueryRow(ctx, `SELECT favorites FROM `+f.s.t.entityCounts+`
 		WHERE entity_type = $1 AND entity_id = $2`, entityType, entityID).Scan(&n)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, nil
+	}
 	return n, err
 }
 
@@ -119,8 +153,8 @@ func (f *favorites) CountsByEntity(ctx context.Context, entityType string, ids [
 	if len(ids) == 0 {
 		return out, nil
 	}
-	rows, err := f.s.pool.Query(ctx, `SELECT entity_id, count(*) FROM `+f.s.t.favorites+`
-		WHERE entity_type = $1 AND entity_id = ANY($2) GROUP BY entity_id`,
+	rows, err := f.s.pool.Query(ctx, `SELECT entity_id, favorites FROM `+f.s.t.entityCounts+`
+		WHERE entity_type = $1 AND entity_id = ANY($2) AND favorites > 0`,
 		entityType, ids)
 	if err != nil {
 		return nil, err

@@ -54,7 +54,7 @@ func TestComments_TopLevelRepliesAndReplyCount(t *testing.T) {
 	}
 
 	// List returns TOP-LEVEL comments only, newest-first, with reply_count.
-	top, err := rt.comments.list(ctx, author, "gallery", "1", 10, 0)
+	top, err := rt.comments.list(ctx, author, "gallery", "1", "", 10, 0)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -153,7 +153,7 @@ func TestComments_SoftDeleteKeepsThread(t *testing.T) {
 	if err := rt.comments.softDelete(ctx, author, parent.ID); err != nil {
 		t.Fatalf("soft delete: %v", err)
 	}
-	top, err := rt.comments.list(ctx, author, "gallery", "1", 10, 0)
+	top, err := rt.comments.list(ctx, author, "gallery", "1", "", 10, 0)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -218,7 +218,7 @@ func TestComments_ReactionCountersExact(t *testing.T) {
 	}
 	wg.Wait()
 
-	top, err := rt.comments.list(ctx, reactor, "gallery", "1", 10, 0)
+	top, err := rt.comments.list(ctx, reactor, "gallery", "1", "", 10, 0)
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -233,7 +233,7 @@ func TestComments_ReactionCountersExact(t *testing.T) {
 	if _, err := rt.comments.reactTx(ctx, reactor, cm.ID, -1); err != nil {
 		t.Fatalf("switch reaction: %v", err)
 	}
-	top, _ = rt.comments.list(ctx, reactor, "gallery", "1", 10, 0)
+	top, _ = rt.comments.list(ctx, reactor, "gallery", "1", "", 10, 0)
 	i = indexOfComment(top, cm.ID)
 	if top[i].Likes != 0 || top[i].Dislikes != 1 {
 		t.Fatalf("after switch: likes %d dislikes %d, want 0/1", top[i].Likes, top[i].Dislikes)
@@ -248,14 +248,14 @@ func TestComments_ReplyCountDecrementsOnDelete(t *testing.T) {
 	r1 := mustComment(t, rt, author, "gallery", "1", createInput{Body: "r1", ParentID: parent.ID})
 	_ = mustComment(t, rt, author, "gallery", "1", createInput{Body: "r2", ParentID: parent.ID})
 
-	top, _ := rt.comments.list(ctx, author, "gallery", "1", 10, 0)
+	top, _ := rt.comments.list(ctx, author, "gallery", "1", "", 10, 0)
 	if got := top[indexOfComment(top, parent.ID)].ReplyCount; got != 2 {
 		t.Fatalf("reply_count = %d, want 2", got)
 	}
 	if err := rt.comments.softDelete(ctx, author, r1.ID); err != nil {
 		t.Fatalf("delete reply: %v", err)
 	}
-	top, _ = rt.comments.list(ctx, author, "gallery", "1", 10, 0)
+	top, _ = rt.comments.list(ctx, author, "gallery", "1", "", 10, 0)
 	if got := top[indexOfComment(top, parent.ID)].ReplyCount; got != 1 {
 		t.Fatalf("reply_count after reply delete = %d, want 1 (drifted)", got)
 	}

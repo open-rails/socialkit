@@ -415,8 +415,8 @@ Acceptance: both importers write comments/reactions/favorites/polls/blog into `s
 
 # #20: Per-entity aggregate counts + count-based sorting
 
-**Completed:** no
-Status: TODO — important for doujins (sort galleries/videos by likes/favorites/comments; sort posts/comments by best). Decisions settled with the owner.
+**Completed:** yes
+Status: DONE — `social_entity_counts` rollup (likes/dislikes/favorites/comment_count per entity), maintained IN-TX by reactions (`bumpCounts` in `applyTx`), favorites (add/remove), and top-level comments (create/delete); `reply_count` now decrements on reply soft-delete. Reads are O(1): `reactions.counts`, `favorites.Count/CountsByEntity`, and public `Runtime.Counts/CountsByEntity`. Sort indexes incl. a Wilson-lower-bound expression index for "best"; posts + comments lists accept `sort=newest|likes|best` via `orderBy`. Additive (kept owning-row like columns). Integration-tested: rollup aggregates + unfavorite/switch, comment_count lifecycle, sort-by-likes. NB: existing prod data needs a one-shot recompute-from-source to seed the rollup at adoption.
 
 **Problem:** today socialkit denormalizes like/dislike counts on the owning row (`social_comments.likes/dislikes`, `social_posts.total_*`) transactionally + exact, and `reply_count` on the comment — BUT there is NO per-*entity* aggregate, so "likes/favorites/comment_count on gallery X" is computed on read via COUNT/GROUP BY. That is fine for one item's detail page but cannot efficiently **sort many items** by those counts, and there's no index to rank on. Two known miscounts to fix too: `reply_count` isn't decremented on reply soft-delete (drifts high); generic-entity reaction counts are on-read GROUP BY.
 
@@ -443,8 +443,8 @@ Acceptance: any item's likes/dislikes/favorites/comment_count read O(1) and sort
 
 # #21: Inline post media upload
 
-**Completed:** no
-Status: TODO (small) — needed for blog: the editor uploads an image mid-article and gets a URL to embed in the Quill Delta body.
+**Completed:** yes
+Status: DONE — `POST /posts/media` (PostWrite-gated, multipart) uploads to the media store under `posts/media/{uuid}.{ext}` and returns `{url}` for the editor to embed. Tested with the fake store + perm gate.
 
 socialkit's media store already does poll option images + post covers; add a general `POST /posts/media` (PostWrite-gated, multipart) that uploads to the media store under `posts/media/{uuid}.{ext}` and returns `{url}`. The editor drops that URL into the Delta, so inline images carry their final socialkit-bucket URL at write time (kills doujins' read-time image-URL rewrite for new posts).
 

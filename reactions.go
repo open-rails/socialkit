@@ -59,7 +59,7 @@ func (r *reactions) applyTx(ctx context.Context, tx pgx.Tx, actor Actor, entityT
 			return 0, 0, err
 		}
 		dLikes, dDislikes = delta(prev, value)
-		return dLikes, dDislikes, nil
+		return r.bumpAndReturn(ctx, tx, entityType, entityID, dLikes, dDislikes)
 	}
 
 	// No existing row: insert, tolerating a concurrent insert. ON CONFLICT DO
@@ -74,7 +74,7 @@ func (r *reactions) applyTx(ctx context.Context, tx pgx.Tx, actor Actor, entityT
 	}
 	if tag.RowsAffected() == 1 {
 		dLikes, dDislikes = delta(0, value)
-		return dLikes, dDislikes, nil
+		return r.bumpAndReturn(ctx, tx, entityType, entityID, dLikes, dDislikes)
 	}
 	// Lost the insert race: the row now exists (committed) — lock + update it.
 	prev, found, err = r.lockExisting(ctx, tx, userID, ip, entityType, entityID)
@@ -90,6 +90,15 @@ func (r *reactions) applyTx(ctx context.Context, tx pgx.Tx, actor Actor, entityT
 		return 0, 0, err
 	}
 	dLikes, dDislikes = delta(prev, value)
+	return r.bumpAndReturn(ctx, tx, entityType, entityID, dLikes, dDislikes)
+}
+
+// bumpAndReturn denormalizes the reaction delta into the per-entity rollup
+// (same tx) and returns the deltas for callers that also keep their own counter.
+func (r *reactions) bumpAndReturn(ctx context.Context, tx pgx.Tx, entityType, entityID string, dLikes, dDislikes int) (int, int, error) {
+	if err := bumpCounts(ctx, tx, r.s, entityType, entityID, dLikes, dDislikes, 0, 0); err != nil {
+		return 0, 0, err
+	}
 	return dLikes, dDislikes, nil
 }
 
@@ -133,30 +142,12 @@ func (r *reactions) react(ctx context.Context, actor Actor, entityType, entityID
 }
 
 // counts returns the SPLIT tally plus the caller's own reaction, on a querier
-// (pool or tx). Counts are computed on read (GROUP BY) — no denorm imposed on
-// host entities.
+// (pool or tx). The tally is an O(1) read of the per-entity rollup, which
+// applyTx maintains in-tx.
 func (r *reactions) counts(ctx context.Context, q querier, actor Actor, entityType, entityID string) (reactionCounts, error) {
 	var out reactionCounts
-	rows, err := q.Query(ctx, `SELECT value, count(*) FROM `+r.s.t.reactions+`
-		WHERE entity_type = $1 AND entity_id = $2 GROUP BY value`, entityType, entityID)
-	if err != nil {
-		return out, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var v int16
-		var n int
-		if err := rows.Scan(&v, &n); err != nil {
-			return out, err
-		}
-		switch v {
-		case 1:
-			out.Likes = n
-		case -1:
-			out.Dislikes = n
-		}
-	}
-	if err := rows.Err(); err != nil {
+	if err := q.QueryRow(ctx, `SELECT likes, dislikes FROM `+r.s.t.entityCounts+`
+		WHERE entity_type = $1 AND entity_id = $2`, entityType, entityID).Scan(&out.Likes, &out.Dislikes); err != nil && !errors.Is(err, pgx.ErrNoRows) {
 		return out, err
 	}
 	if userID, ip, ok := reactionKey(actor); ok {
