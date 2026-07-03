@@ -35,7 +35,7 @@ func newPosts(rt *Runtime) *posts {
 		p.language, p.is_draft, p.live_at, p.total_likes, p.total_dislikes,
 		p.created_at, p.updated_at,
 		(SELECT count(*) FROM ` + s.t.comments + ` c
-			WHERE c.entity_type = 'post' AND c.entity_id = p.id::text
+			WHERE c.entity_type = 'post' AND c.entity_id = p.id
 			AND c.deleted_at IS NULL) AS comment_count`
 	return &posts{rt: rt, s: s, cols: cols}
 }
@@ -119,7 +119,7 @@ func (p *posts) handleCover(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	id := req.PathValue("id")
-	if !uuidRe.MatchString(id) {
+	if id == "" || len(id) > 64 { // post ids are opaque text (uuid or legacy numeric)
 		writeErr(w, ErrNotFound)
 		return
 	}
@@ -228,7 +228,7 @@ func (p *posts) handleUpdate(w http.ResponseWriter, req *http.Request) {
 		language = COALESCE($6, language), cover_url = COALESCE($7, cover_url),
 		is_draft = COALESCE($8, is_draft), live_at = COALESCE($9, live_at),
 		updated_at = now()
-		WHERE id::text = $1 AND deleted_at IS NULL`,
+		WHERE id = $1 AND deleted_at IS NULL`,
 		id, in.Title, body, excerpt, in.Slug, in.Language, in.CoverURL, in.IsDraft, in.LiveAt)
 	if err != nil {
 		writeErr(w, err)
@@ -259,7 +259,7 @@ func (p *posts) handleDelete(w http.ResponseWriter, req *http.Request) {
 	var title, body, language string
 	err := p.s.pool.QueryRow(ctx, `UPDATE `+p.s.t.posts+`
 		SET deleted_at = now(), updated_at = now()
-		WHERE id::text = $1 AND deleted_at IS NULL
+		WHERE id = $1 AND deleted_at IS NULL
 		RETURNING title, body, language`, id).Scan(&title, &body, &language)
 	if errors.Is(err, pgx.ErrNoRows) {
 		writeErr(w, ErrNotFound)
@@ -364,7 +364,7 @@ func (p *posts) react(ctx context.Context, actor Actor, id string, value int16) 
 	if dLikes != 0 || dDislikes != 0 {
 		if _, err := tx.Exec(ctx, `UPDATE `+p.s.t.posts+`
 			SET total_likes = total_likes + $1, total_dislikes = total_dislikes + $2, updated_at = now()
-			WHERE id::text = $3`, dLikes, dDislikes, id); err != nil {
+			WHERE id = $3`, dLikes, dDislikes, id); err != nil {
 			return err
 		}
 	}
@@ -375,7 +375,7 @@ func (p *posts) react(ctx context.Context, actor Actor, id string, value int16) 
 // as text so a non-uuid path 404s instead of erroring on the uuid cast.
 func (p *posts) loadByID(ctx context.Context, q querier, id string) (postView, error) {
 	row := q.QueryRow(ctx, `SELECT `+p.cols+` FROM `+p.s.t.posts+` p
-		WHERE p.id::text = $1 AND p.deleted_at IS NULL`, id)
+		WHERE p.id = $1 AND p.deleted_at IS NULL`, id)
 	v, err := scanPost(row)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return postView{}, ErrNotFound
@@ -388,7 +388,7 @@ func (p *posts) loadByID(ctx context.Context, q querier, id string) (postView, e
 func (p *posts) requirePublished(ctx context.Context, q querier, id string) error {
 	var ok bool
 	err := q.QueryRow(ctx, `SELECT true FROM `+p.s.t.posts+`
-		WHERE id::text = $1 AND deleted_at IS NULL AND is_draft = false
+		WHERE id = $1 AND deleted_at IS NULL AND is_draft = false
 		AND (live_at IS NULL OR live_at <= now())`, id).Scan(&ok)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return ErrNotFound

@@ -112,7 +112,7 @@ CREATE UNIQUE INDEX social_poll_votes_ip_uq
 -- reasoning as comments. NOT `blog_posts` — the name is the one real lock-in.
 -- ----------------------------------------------------------------------------
 CREATE TABLE social_posts (
-    id             uuid        PRIMARY KEY DEFAULT gen_random_uuid(),
+    id             text        PRIMARY KEY DEFAULT gen_random_uuid()::text,  -- opaque; hosts may backfill legacy numeric ids
     author_id      text        NOT NULL,
     title          text        NOT NULL,
     slug           text,
