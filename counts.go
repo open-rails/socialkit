@@ -75,6 +75,16 @@ func (rt *Runtime) ListFavorites(ctx context.Context, userID string, limit, offs
 	return rt.favorites.list(ctx, userID, limit, offset)
 }
 
+// LatestComments is the host-facing feed API (see comments.latest): newest
+// comments across all entities the given actor may see, with canonical entity
+// keys for host-side title/cover enrichment.
+func (rt *Runtime) LatestComments(ctx context.Context, actor Actor, limit, offset int) ([]FeedItem, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	return rt.comments.latest(ctx, actor, limit, offset)
+}
+
 // IsFavorited batch-checks bookmarks for a user (host-facing; every requested
 // key is present in the map, absent bookmarks => false).
 func (rt *Runtime) IsFavorited(ctx context.Context, userID string, targets []EntityKey) (map[EntityKey]bool, error) {
