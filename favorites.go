@@ -2,12 +2,9 @@ package socialkit
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"strconv"
 	"time"
-
-	"github.com/jackc/pgx/v5"
 )
 
 // favorites is the user-only bookmark (wishlist): an unsigned presence over the
@@ -135,43 +132,6 @@ func (f *favorites) IsFavorited(ctx context.Context, userID string, targets []En
 			return nil, err
 		}
 		out[k] = true
-	}
-	return out, rows.Err()
-}
-
-// Count returns how many users have favorited one entity — an O(1) read of the
-// per-entity rollup (maintained in-tx on add/remove).
-func (f *favorites) Count(ctx context.Context, entityType, entityID string) (int, error) {
-	var n int
-	err := f.s.pool.QueryRow(ctx, `SELECT favorites FROM `+f.s.t.entityCounts+`
-		WHERE entity_type = $1 AND entity_id = $2`, entityType, entityID).Scan(&n)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return 0, nil
-	}
-	return n, err
-}
-
-// CountsByEntity batch-tallies favorites for several ids of one type. Ids with
-// zero favorites are omitted (host reads missing as 0).
-func (f *favorites) CountsByEntity(ctx context.Context, entityType string, ids []string) (map[string]int, error) {
-	out := make(map[string]int, len(ids))
-	if len(ids) == 0 {
-		return out, nil
-	}
-	rows, err := f.s.pool.Query(ctx, `SELECT entity_id, favorites FROM `+f.s.t.entityCounts+`
-		WHERE entity_type = $1 AND entity_id = ANY($2) AND favorites > 0`,
-		entityType, ids)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var id string
-		var n int
-		if err := rows.Scan(&id, &n); err != nil {
-			return nil, err
-		}
-		out[id] = n
 	}
 	return out, rows.Err()
 }

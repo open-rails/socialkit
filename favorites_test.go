@@ -49,16 +49,16 @@ func TestFavorites_AddRemoveStatusRecorder(t *testing.T) {
 	if k := favLastKind(rec); k != "favorite" {
 		t.Fatalf("recorder kind after add = %q, want favorite", k)
 	}
-	if n, err := f.Count(ctx, "widget", "1"); err != nil || n != 1 {
-		t.Fatalf("Count after add = %d err=%v, want 1", n, err)
+	if c, err := rt.Counts(ctx, "widget", "1"); err != nil || c.Favorites != 1 {
+		t.Fatalf("favorites count after add = %d err=%v, want 1", c.Favorites, err)
 	}
 
 	// re-add is idempotent: no error, still a single row.
 	if err := f.add(ctx, actor, "widget", "1"); err != nil {
 		t.Fatalf("re-add: %v", err)
 	}
-	if n, err := f.Count(ctx, "widget", "1"); err != nil || n != 1 {
-		t.Fatalf("Count after re-add = %d err=%v, want 1 (idempotent)", n, err)
+	if c, err := rt.Counts(ctx, "widget", "1"); err != nil || c.Favorites != 1 {
+		t.Fatalf("favorites count after re-add = %d err=%v, want 1 (idempotent)", c.Favorites, err)
 	}
 
 	// remove -> not favorited, recorder emits "unfavorite".
@@ -71,8 +71,8 @@ func TestFavorites_AddRemoveStatusRecorder(t *testing.T) {
 	if k := favLastKind(rec); k != "unfavorite" {
 		t.Fatalf("recorder kind after remove = %q, want unfavorite", k)
 	}
-	if n, err := f.Count(ctx, "widget", "1"); err != nil || n != 0 {
-		t.Fatalf("Count after remove = %d err=%v, want 0", n, err)
+	if c, err := rt.Counts(ctx, "widget", "1"); err != nil || c.Favorites != 0 {
+		t.Fatalf("favorites count after remove = %d err=%v, want 0", c.Favorites, err)
 	}
 
 	// remove again is idempotent (no row) -> no error.
@@ -225,19 +225,19 @@ func TestFavorites_ListAndCounts(t *testing.T) {
 		t.Fatalf("list order = %v, want %v (newest-first)", order, want)
 	}
 
-	// a second user favorites widget/1 -> Count reflects both users.
+	// a second user favorites widget/1 -> the rollup reflects both users.
 	if err := f.add(ctx, u2, "widget", "1"); err != nil {
 		t.Fatalf("u2 add: %v", err)
 	}
-	if n, err := f.Count(ctx, "widget", "1"); err != nil || n != 2 {
-		t.Fatalf("Count(widget,1) = %d err=%v, want 2", n, err)
+	if c, err := rt.Counts(ctx, "widget", "1"); err != nil || c.Favorites != 2 {
+		t.Fatalf("favorites count(widget,1) = %d err=%v, want 2", c.Favorites, err)
 	}
-	counts, err := f.CountsByEntity(ctx, "widget", []string{"1", "2", "3", "4"})
+	counts, err := rt.CountsByEntity(ctx, "widget", []string{"1", "2", "3", "4"})
 	if err != nil {
 		t.Fatalf("CountsByEntity: %v", err)
 	}
-	if counts["1"] != 2 || counts["2"] != 1 || counts["3"] != 1 || counts["4"] != 0 {
-		t.Fatalf("CountsByEntity = %v, want 1:2 2:1 3:1 4:0", counts)
+	if counts["1"].Favorites != 2 || counts["2"].Favorites != 1 || counts["3"].Favorites != 1 || counts["4"].Favorites != 0 {
+		t.Fatalf("CountsByEntity favorites = %v, want 1:2 2:1 3:1 4:0", counts)
 	}
 
 	// pagination: limit 2 returns the two newest, offset walks the window.
