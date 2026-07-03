@@ -321,9 +321,9 @@ Doujins is the reference/lead. Per system: backfill → cut over reads/writes �
 - [ ] Drop table `blog_posts`.
 
 **Favorites:**
-- [ ] Backfill `doujins.gallery_favorites` → `social_favorites` (entity_type `"gallery"`); cut over.
-- [ ] DELETE: `internal/services/gallery/favorites.go`, `internal/database/repo/gallery_favorites.go`, `models.FavoriteGallery`, the favorites routes in `content.go`.
-- [ ] Drop table `gallery_favorites` + the `trg_gallery_favorite_count` trigger + `galleries.favorites_count` column — read the count from socialkit's `Count()` (or keep a host trigger fed by `social_favorites` if a denormalized column is still wanted).
+- [x] Backfill `doujins.gallery_favorites` → `social_favorites`; cut over. (0030; key = `"<gallery_id>:<lang>"` per owner decision, legacy rows `:en`; hydrated GET /galleries/favorites stays host-side sourcing ids from `Runtime.ListFavorites`; frontend add/remove/check on socialkit routes; doujins branch @ 48512760a)
+- [x] DELETE: `internal/services/gallery/favorites.go` (write path), `internal/database/repo/gallery_favorites.go`, `models.FavoriteGallery`, the favorites routes in `content.go` (list route kept as the thin hydrated host route).
+- [ ] Drop table `gallery_favorites` + the old `trg_gallery_favorite_count` trigger — `galleries.favorites_count` KEPT, now maintained by new triggers on `social_favorites` (0030). Drop pairs with the #19 favorites-importer retarget.
 
 **Cutover-wide:**
 - [ ] Frontend: reconcile callers to socialkit's API shape — either mount the kit at doujins' existing route paths with matching response shapes, or update the frontend. (This is where API-contract drift bites; do it per system.)
