@@ -571,6 +571,11 @@ func (p *polls) handleQuestionImage(w http.ResponseWriter, req *http.Request) {
 		writeErr(w, err)
 		return
 	}
+	// Remember the previous image so a replace under a different key (extension
+	// changed) can drop the old object instead of orphaning it. Best-effort.
+	var prev *string
+	_ = p.s.pool.QueryRow(req.Context(), `SELECT image_url FROM `+p.s.t.pollQuestions+`
+		WHERE id = $1 AND deleted_at IS NULL`, id).Scan(&prev)
 	tag, err := p.s.pool.Exec(req.Context(), `UPDATE `+p.s.t.pollQuestions+`
 		SET image_url = $2, updated_at = now() WHERE id = $1 AND deleted_at IS NULL`, id, url)
 	if err != nil {
@@ -580,6 +585,9 @@ func (p *polls) handleQuestionImage(w http.ResponseWriter, req *http.Request) {
 	if tag.RowsAffected() == 0 {
 		writeErr(w, ErrNotFound)
 		return
+	}
+	if prev != nil && *prev != url {
+		p.rt.deleteMediaByURL(req.Context(), *prev)
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"image_url": url})
 }
@@ -607,6 +615,9 @@ func (p *polls) handleOptionImage(w http.ResponseWriter, req *http.Request) {
 		writeErr(w, err)
 		return
 	}
+	// Best-effort old-object cleanup on a key-changing replace (see question image).
+	var prev *string
+	_ = p.s.pool.QueryRow(req.Context(), `SELECT image_url FROM `+p.s.t.pollOptions+` WHERE id = $1`, oid).Scan(&prev)
 	tag, err := p.s.pool.Exec(req.Context(), `UPDATE `+p.s.t.pollOptions+` SET image_url = $2 WHERE id = $1`, oid, url)
 	if err != nil {
 		writeErr(w, err)
@@ -615,6 +626,9 @@ func (p *polls) handleOptionImage(w http.ResponseWriter, req *http.Request) {
 	if tag.RowsAffected() == 0 {
 		writeErr(w, ErrNotFound)
 		return
+	}
+	if prev != nil && *prev != url {
+		p.rt.deleteMediaByURL(req.Context(), *prev)
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"image_url": url})
 }

@@ -11,9 +11,14 @@ import (
 
 func multipartUpload(t *testing.T, method, path string, content []byte) *http.Request {
 	t.Helper()
+	return multipartUploadNamed(t, method, path, "img.png", content)
+}
+
+func multipartUploadNamed(t *testing.T, method, path, filename string, content []byte) *http.Request {
+	t.Helper()
 	var buf bytes.Buffer
 	w := multipart.NewWriter(&buf)
-	fw, err := w.CreateFormFile("file", "img.png")
+	fw, err := w.CreateFormFile("file", filename)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -102,6 +107,61 @@ func TestMedia_PostInlineUpload(t *testing.T) {
 	}
 	if media.count() != 1 {
 		t.Fatalf("expected 1 stored inline image, got %d", media.count())
+	}
+}
+
+// Replacing an image under a different key (extension changed) deletes the old
+// object instead of orphaning it; same-key replaces overwrite in place.
+func TestMedia_ReplaceDeletesOldObject(t *testing.T) {
+	media := &fakeMedia{}
+	rt, _ := newTestRuntime(t, Options{Authz: allowAll{}, Perms: Perms{PostWrite: "root:post:update"}, Media: media})
+	id := insertPost(t, rt)
+	admin := Actor{ID: "admin"}
+
+	for _, name := range []string{"one.png", "two.jpg"} {
+		req := multipartUploadNamed(t, "POST", "/posts/"+id+"/cover", name, []byte("IMG-"+name))
+		req = req.WithContext(withActor(req.Context(), admin))
+		rec := httptest.NewRecorder()
+		rt.Handler().ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("upload %s: status %d: %s", name, rec.Code, rec.Body.String())
+		}
+	}
+	if _, ok := media.stored("posts/" + id + "/cover.png"); ok {
+		t.Fatal("old .png cover not deleted after .jpg replace")
+	}
+	if _, ok := media.stored("posts/" + id + "/cover.jpg"); !ok {
+		t.Fatal("new .jpg cover missing")
+	}
+}
+
+// Pure: DeleteByURL leaves URLs outside the store's public origin alone (a nil
+// client would panic if it were wrongly called for a foreign or legacy URL).
+func TestStorage_DeleteByURLForeignOrigin(t *testing.T) {
+	s := &s3Store{publicBaseURL: "https://cdn.test"}
+	if err := s.DeleteByURL(context.Background(), "https://elsewhere.example/img.png"); err != nil {
+		t.Fatalf("foreign URL should no-op, got %v", err)
+	}
+	if err := s.DeleteByURL(context.Background(), "polls/legacy-relative.png"); err != nil {
+		t.Fatalf("legacy relative path should no-op, got %v", err)
+	}
+}
+
+// An upload larger than maxUploadBytes is rejected with 400 instead of being
+// silently truncated to the first 10 MiB (a corrupt image) and stored.
+func TestMedia_OversizeUploadRejected(t *testing.T) {
+	media := &fakeMedia{}
+	rt, _ := newTestRuntime(t, Options{Authz: allowAll{}, Perms: Perms{PostWrite: "root:post:update"}, Media: media})
+	big := bytes.Repeat([]byte("x"), maxUploadBytes+1)
+	req := multipartUpload(t, "POST", "/posts/media", big)
+	req = req.WithContext(withActor(req.Context(), Actor{ID: "admin"}))
+	rec := httptest.NewRecorder()
+	rt.Handler().ServeHTTP(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("want 400 for oversize upload, got %d: %s", rec.Code, rec.Body.String())
+	}
+	if media.count() != 0 {
+		t.Fatalf("oversize upload must not reach the media store (stored %d)", media.count())
 	}
 }
 

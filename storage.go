@@ -72,7 +72,7 @@ func (s *s3Store) Put(ctx context.Context, key string, data []byte, contentType 
 	return s.publicBaseURL + "/" + key, nil
 }
 
-// Delete removes an object (best-effort; used when replacing an image).
+// Delete removes an object (best-effort; DeleteByURL routes replaced images here).
 func (s *s3Store) Delete(ctx context.Context, key string) error {
 	key = strings.TrimLeft(key, "/")
 	_, err := s.client.DeleteObject(ctx, &s3.DeleteObjectInput{
@@ -80,6 +80,32 @@ func (s *s3Store) Delete(ctx context.Context, key string) error {
 		Key:    aws.String(key),
 	})
 	return err
+}
+
+// DeleteByURL implements mediaURLDeleter: it recovers the key from a URL a
+// previous Put returned and deletes the object. URLs outside this store's
+// public origin (host-side or legacy-relative paths) are left alone.
+func (s *s3Store) DeleteByURL(ctx context.Context, url string) error {
+	key, ok := strings.CutPrefix(url, s.publicBaseURL+"/")
+	if !ok || key == "" {
+		return nil
+	}
+	return s.Delete(ctx, key)
+}
+
+// mediaURLDeleter is an optional MediaStore extension: delete the object behind
+// a URL a previous Put returned. Used best-effort when an image is replaced
+// under a different key (extension changed), so the old object is not orphaned.
+type mediaURLDeleter interface {
+	DeleteByURL(ctx context.Context, url string) error
+}
+
+// deleteMediaByURL best-effort removes a replaced object when the store
+// supports deletion; a failure just leaves an orphan (same as before).
+func (rt *Runtime) deleteMediaByURL(ctx context.Context, url string) {
+	if d, ok := rt.media.(mediaURLDeleter); ok && url != "" {
+		_ = d.DeleteByURL(ctx, url)
+	}
 }
 
 // resolveMedia picks the MediaStore: an explicit Media port wins (host override);
@@ -99,8 +125,13 @@ func resolveMedia(opts Options) (MediaStore, error) {
 const maxUploadBytes = 10 << 20
 
 // readUpload reads the multipart "file" field with a size cap and returns its
-// bytes + content type + a filename extension.
+// bytes + content type + a filename extension. Oversize uploads are REJECTED
+// (400), never silently truncated to a corrupt image.
 func readUpload(r *http.Request) (data []byte, contentType, ext string, err error) {
+	// Cap the whole body before parsing: ParseMultipartForm's argument is only
+	// the in-memory threshold (the rest spills to temp files), not a limit. The
+	// slack covers multipart framing around a max-size file.
+	r.Body = http.MaxBytesReader(nil, r.Body, maxUploadBytes+(64<<10))
 	if err = r.ParseMultipartForm(maxUploadBytes); err != nil {
 		return nil, "", "", badRequest("invalid multipart form: %v", err)
 	}
@@ -110,8 +141,12 @@ func readUpload(r *http.Request) (data []byte, contentType, ext string, err erro
 	}
 	defer f.Close()
 	var b bytes.Buffer
-	if _, err := b.ReadFrom(io.LimitReader(f, maxUploadBytes)); err != nil {
+	n, err := b.ReadFrom(io.LimitReader(f, maxUploadBytes+1))
+	if err != nil {
 		return nil, "", "", err
+	}
+	if n > maxUploadBytes {
+		return nil, "", "", badRequest("file exceeds the %d MiB upload limit", maxUploadBytes>>20)
 	}
 	contentType = hdr.Header.Get("Content-Type")
 	if contentType == "" {

@@ -133,6 +133,9 @@ func (p *posts) handleCover(w http.ResponseWriter, req *http.Request) {
 		writeErr(w, err)
 		return
 	}
+	// Best-effort old-cover cleanup on a key-changing replace (extension changed).
+	var prev *string
+	_ = p.s.pool.QueryRow(req.Context(), `SELECT cover_url FROM `+p.s.t.posts+` WHERE id = $1 AND deleted_at IS NULL`, id).Scan(&prev)
 	tag, err := p.s.pool.Exec(req.Context(), `UPDATE `+p.s.t.posts+` SET cover_url = $2, updated_at = now() WHERE id = $1 AND deleted_at IS NULL`, id, url)
 	if err != nil {
 		writeErr(w, err)
@@ -141,6 +144,9 @@ func (p *posts) handleCover(w http.ResponseWriter, req *http.Request) {
 	if tag.RowsAffected() == 0 {
 		writeErr(w, ErrNotFound)
 		return
+	}
+	if prev != nil && *prev != url {
+		p.rt.deleteMediaByURL(req.Context(), *prev)
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"cover_url": url})
 }

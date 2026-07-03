@@ -3,6 +3,7 @@ package socialkit
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -140,6 +141,19 @@ func (f *fakeMedia) Put(_ context.Context, key string, data []byte, _ string) (s
 	}
 	f.puts[key] = data
 	return "https://cdn.test/" + key, nil
+}
+
+// DeleteByURL mirrors s3Store's optional mediaURLDeleter: URLs outside the
+// fake origin are ignored; matching keys are removed from the store.
+func (f *fakeMedia) DeleteByURL(_ context.Context, url string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key, ok := strings.CutPrefix(url, "https://cdn.test/")
+	if !ok {
+		return nil
+	}
+	delete(f.puts, key)
+	return nil
 }
 
 func (f *fakeMedia) stored(key string) ([]byte, bool) {
