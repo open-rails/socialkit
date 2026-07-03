@@ -16,6 +16,10 @@ func (e moderationError) Error() string { return e.reason }
 // rejectModeration is the helper a Moderation implementation returns to reject.
 func rejectModeration(reason string) error { return moderationError{reason: reason} }
 
+// RejectModeration is the rejection a HOST Moderation implementation returns;
+// writeErr surfaces it as 422 (any other error is an internal 500).
+func RejectModeration(reason string) error { return rejectModeration(reason) }
+
 // DefaultModeration is the zero-config policy every host gets unless it wires
 // its own Moderation port: block links, reject near-instant duplicate posts
 // from the same actor, and censor a tiny profanity set. Each rule is
