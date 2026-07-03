@@ -3,7 +3,6 @@ package socialkit
 import (
 	"context"
 	"net/http"
-	"strconv"
 	"time"
 )
 
@@ -224,19 +223,4 @@ func (f *favorites) handleList(w http.ResponseWriter, req *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, items)
-}
-
-// parsePage reads limit/offset with a default limit of 20 and a hard cap of 100.
-func parsePage(req *http.Request) (limit, offset int) {
-	limit, offset = 20, 0
-	if v, err := strconv.Atoi(req.URL.Query().Get("limit")); err == nil && v > 0 {
-		limit = v
-	}
-	if limit > 100 {
-		limit = 100
-	}
-	if v, err := strconv.Atoi(req.URL.Query().Get("offset")); err == nil && v > 0 {
-		offset = v
-	}
-	return limit, offset
 }

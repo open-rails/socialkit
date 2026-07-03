@@ -127,9 +127,9 @@ type ContentProcessor interface {
 }
 
 // Perms carries the host-supplied, opaque permission strings socialkit checks
-// via Authorizer.Can before privileged writes. Empty string => that action is
-// treated as allowed-for-anyone is NOT assumed; an empty gate on an admin action
-// fails closed (see runtime.requirePerm).
+// via Authorizer.Can before privileged writes. An empty string does NOT mean
+// allowed-for-anyone: an unset gate on a privileged action fails closed (see
+// runtime.requirePerm).
 type Perms struct {
 	PostWrite       string // create/update/delete posts (doujins/hentai0: "root:post:update")
 	PollWrite       string // create/update/delete polls + options

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 )
 
 // httpError carries an explicit status for handler-level failures (validation,
@@ -64,4 +65,20 @@ func decodeJSON(r *http.Request, dst any) error {
 		return badRequest("invalid JSON body: %v", err)
 	}
 	return nil
+}
+
+// parsePage reads limit/offset with a default limit of 20 and a hard cap of 100.
+// The shared pager for every module's list handler.
+func parsePage(req *http.Request) (limit, offset int) {
+	limit, offset = 20, 0
+	if v, err := strconv.Atoi(req.URL.Query().Get("limit")); err == nil && v > 0 {
+		limit = v
+	}
+	if limit > 100 {
+		limit = 100
+	}
+	if v, err := strconv.Atoi(req.URL.Query().Get("offset")); err == nil && v > 0 {
+		offset = v
+	}
+	return limit, offset
 }
