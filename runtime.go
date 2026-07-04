@@ -3,9 +3,11 @@ package socialkit
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -58,6 +60,10 @@ type Options struct {
 	// SkipMigrate skips the self-migration at construction (host runs a central
 	// migrate step). Runtime still validates the schema is present.
 	SkipMigrate bool
+
+	// Logger receives socialkit's access log: each request at DEBUG, and a 500 at
+	// ERROR with its cause (4xx are debug-only, not failures). nil -> slog.Default().
+	Logger *slog.Logger
 }
 
 // Runtime is an embedded socialkit instance: shared deps + the module services,
@@ -74,6 +80,7 @@ type Runtime struct {
 	media    MediaStore
 	content  ContentProcessor
 	perms    Perms
+	log      *slog.Logger
 	types    map[string]struct{}
 	// mediaBase absolutizes stored relative media paths (legacy/backfilled rows)
 	// against the public bucket origin; empty = serve values verbatim.
@@ -116,6 +123,7 @@ func New(ctx context.Context, opts Options) (*Runtime, error) {
 		media:    media,
 		content:  orDefault[ContentProcessor](opts.Content, stripProcessor{}),
 		perms:    opts.Perms,
+		log:      orDefault[*slog.Logger](opts.Logger, slog.Default()),
 		types:    make(map[string]struct{}, len(opts.EntityTypes)),
 	}
 	if opts.Storage != nil {
@@ -169,7 +177,31 @@ func (rt *Runtime) Handler() http.Handler {
 	rt.comments.mount(mux)
 	rt.posts.mount(mux)
 	rt.favorites.mount(mux)
-	return mux
+	return rt.accessLog(mux)
+}
+
+// accessLog logs each request at DEBUG, and a 500 at ERROR with its cause. 4xx are
+// expected client outcomes, logged only at debug.
+func (rt *Runtime) accessLog(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+		start := time.Now()
+		next.ServeHTTP(sw, r)
+		attrs := []any{
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status", sw.status,
+			"duration", time.Since(start),
+		}
+		if sw.status >= http.StatusInternalServerError {
+			if sw.internalErr != nil {
+				attrs = append(attrs, "err", sw.internalErr.Error())
+			}
+			rt.log.Error("socialkit request failed", attrs...)
+			return
+		}
+		rt.log.Debug("socialkit request", attrs...)
+	})
 }
 
 // --- shared handler helpers used by every module ---

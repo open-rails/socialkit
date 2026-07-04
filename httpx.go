@@ -26,6 +26,19 @@ var (
 	errForbidden    = httpError{status: http.StatusForbidden, msg: "forbidden"}
 )
 
+// statusWriter records the response status and any internal-error cause (set by
+// writeErr) for Runtime.accessLog. Status defaults to 200.
+type statusWriter struct {
+	http.ResponseWriter
+	status      int
+	internalErr error
+}
+
+func (w *statusWriter) WriteHeader(code int) {
+	w.status = code
+	w.ResponseWriter.WriteHeader(code)
+}
+
 // writeErr maps kit errors to HTTP status. Resolver sentinels hide existence
 // (not-visible -> 404); Authorizer/identity failures are fail-closed.
 func writeErr(w http.ResponseWriter, err error) {
@@ -44,6 +57,10 @@ func writeErr(w http.ResponseWriter, err error) {
 		if errors.As(err, &me) {
 			writeJSON(w, http.StatusUnprocessableEntity, map[string]string{"error": me.Error()})
 			return
+		}
+		// A 500: stash the cause for accessLog; the client only gets a generic body.
+		if sw, ok := w.(*statusWriter); ok {
+			sw.internalErr = err
 		}
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 	}
