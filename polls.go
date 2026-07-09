@@ -170,13 +170,22 @@ type listFilter struct {
 }
 
 // list returns non-deleted polls newest-live-first with options + caller vote.
-// Public mode serves only live (live_at <= now) active polls; future/inactive
-// polls never leak.
+// Public mode never leaks future polls (live_at <= now). The default view (no
+// month/date window) serves only the active poll(s); browsing a specific
+// month/date archive returns all live polls in that window regardless of
+// is_active, so historical polls stay readable once a newer poll becomes active.
+// Voting remains gated on is_active elsewhere (see vote()).
 func (p *polls) list(ctx context.Context, actor Actor, f listFilter) ([]pollView, error) {
+	from, to, hasWindow := parseWindow(f.month, f.date)
 	sql := `SELECT id::text, question, language, is_active, coalesce(image_url,''), live_at
 		FROM ` + p.s.t.pollQuestions + ` WHERE deleted_at IS NULL`
 	if !f.admin {
-		sql += ` AND is_active = true AND live_at <= now()`
+		sql += ` AND live_at <= now()`
+		// Only the default (windowless) view is restricted to the active poll;
+		// an explicit month/date archive shows all live polls in that window.
+		if !hasWindow {
+			sql += ` AND is_active = true`
+		}
 	}
 	var args []any
 	arg := func(v any) string {
@@ -186,7 +195,7 @@ func (p *polls) list(ctx context.Context, actor Actor, f listFilter) ([]pollView
 	if f.language != "" {
 		sql += ` AND language = ` + arg(f.language)
 	}
-	if from, to, ok := parseWindow(f.month, f.date); ok {
+	if hasWindow {
 		sql += ` AND live_at >= ` + arg(from) + ` AND live_at < ` + arg(to)
 	}
 	sql += ` ORDER BY live_at DESC LIMIT ` + arg(f.limit) + ` OFFSET ` + arg(f.offset)

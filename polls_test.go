@@ -510,3 +510,66 @@ func TestPolls_OptionCRUD(t *testing.T) {
 		t.Fatalf("non-admin delete = %d, want 403", rec.Code)
 	}
 }
+
+// A deactivated (is_active=false) historical poll must stay hidden from the
+// default public view but remain readable when browsing its specific month
+// archive — while future polls never leak publicly even inside their window.
+func TestPolls_ArchiveWindowShowsInactiveButNotFuture(t *testing.T) {
+	_, p := newPollTest(t, Options{})
+	ctx := context.Background()
+	public := Actor{ID: "anon", Kind: "user"}
+
+	// A live, then-deactivated poll dated to a specific past month.
+	past := time.Date(2020, 3, 15, 12, 0, 0, 0, time.UTC)
+	in := twoOptionPoll("en")
+	in.LiveAt = &past
+	created, err := p.create(ctx, pollAdmin, in)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	deactivate := false
+	if _, err := p.update(ctx, pollAdmin, created.ID, updatePollInput{IsActive: &deactivate}); err != nil {
+		t.Fatalf("deactivate: %v", err)
+	}
+
+	// Default (windowless) public view: inactive poll is hidden.
+	if def, err := p.list(ctx, public, listFilter{language: "en", limit: 20}); err != nil {
+		t.Fatalf("default list: %v", err)
+	} else if len(def) != 0 {
+		t.Fatalf("windowless public list = %d polls, want 0 (inactive hidden)", len(def))
+	}
+
+	// Archive window matching its month: inactive poll IS shown.
+	arch, err := p.list(ctx, public, listFilter{language: "en", month: "2020-03", limit: 20})
+	if err != nil {
+		t.Fatalf("archive list: %v", err)
+	}
+	if len(arch) != 1 || arch[0].ID != created.ID || arch[0].IsActive {
+		t.Fatalf("archive month list = %+v, want the one inactive poll", arch)
+	}
+
+	// A non-matching month returns nothing.
+	if other, err := p.list(ctx, public, listFilter{language: "en", month: "2020-04", limit: 20}); err != nil {
+		t.Fatalf("other-month list: %v", err)
+	} else if len(other) != 0 {
+		t.Fatalf("non-matching month list = %d polls, want 0", len(other))
+	}
+
+	// A future (not-yet-live) poll must NOT leak publicly, even inside its own
+	// archive window — the live_at <= now() guard still applies.
+	future := time.Now().UTC().AddDate(0, 0, 60)
+	fin := twoOptionPoll("en")
+	fin.LiveAt = &future
+	if _, err := p.create(ctx, pollAdmin, fin); err != nil {
+		t.Fatalf("create future: %v", err)
+	}
+	fpub, err := p.list(ctx, public, listFilter{language: "en", month: future.Format("2006-01"), limit: 20})
+	if err != nil {
+		t.Fatalf("future-month list: %v", err)
+	}
+	for _, v := range fpub {
+		if v.LiveAt.After(time.Now()) {
+			t.Fatalf("future poll leaked publicly in archive window: %+v", v)
+		}
+	}
+}
