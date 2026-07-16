@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // favorites is the user-only bookmark (wishlist): an unsigned presence over the
@@ -53,7 +55,8 @@ func (f *favorites) add(ctx context.Context, actor Actor, entityType, entityID s
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() == 1 { // only a real new favorite bumps the rollup
+	changed := tag.RowsAffected() == 1
+	if changed { // only a real new favorite bumps the rollup
 		if err := bumpCounts(ctx, tx, f.s, entityType, entityID, 0, 0, 1, 0); err != nil {
 			return err
 		}
@@ -61,9 +64,11 @@ func (f *favorites) add(ctx context.Context, actor Actor, entityType, entityID s
 	if err := tx.Commit(ctx); err != nil {
 		return err
 	}
-	f.rt.rec.Reaction(ctx, ReactionSignal{
-		EntityType: entityType, EntityID: entityID, ActorID: actor.ID, Kind: "favorite",
-	})
+	if changed {
+		f.rt.rec.Reaction(ctx, ReactionSignal{
+			EntityType: entityType, EntityID: entityID, ActorID: actor.ID, EventID: uuid.NewString(), Kind: "favorite", Delta: 0,
+		})
+	}
 	return nil
 }
 
@@ -85,7 +90,8 @@ func (f *favorites) remove(ctx context.Context, actor Actor, entityType, entityI
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() == 1 { // only a real removal decrements the rollup
+	changed := tag.RowsAffected() == 1
+	if changed { // only a real removal decrements the rollup
 		if err := bumpCounts(ctx, tx, f.s, entityType, entityID, 0, 0, -1, 0); err != nil {
 			return err
 		}
@@ -93,9 +99,11 @@ func (f *favorites) remove(ctx context.Context, actor Actor, entityType, entityI
 	if err := tx.Commit(ctx); err != nil {
 		return err
 	}
-	f.rt.rec.Reaction(ctx, ReactionSignal{
-		EntityType: entityType, EntityID: entityID, ActorID: actor.ID, Kind: "unfavorite",
-	})
+	if changed {
+		f.rt.rec.Reaction(ctx, ReactionSignal{
+			EntityType: entityType, EntityID: entityID, ActorID: actor.ID, EventID: uuid.NewString(), Kind: "unfavorite", Delta: 0,
+		})
+	}
 	return nil
 }
 

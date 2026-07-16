@@ -49,6 +49,11 @@ func TestFavorites_AddRemoveStatusRecorder(t *testing.T) {
 	if k := favLastKind(rec); k != "favorite" {
 		t.Fatalf("recorder kind after add = %q, want favorite", k)
 	}
+	if got := rec.reactionSignals()[0].Delta; got != 0 {
+		t.Fatalf("favorite delta = %d, want 0", got)
+	}
+	favoriteID := rec.reactionSignals()[0].EventID
+	assertValidEventID(t, favoriteID)
 	if c, err := rt.Counts(ctx, "widget", "1"); err != nil || c.Favorites != 1 {
 		t.Fatalf("favorites count after add = %d err=%v, want 1", c.Favorites, err)
 	}
@@ -56,6 +61,9 @@ func TestFavorites_AddRemoveStatusRecorder(t *testing.T) {
 	// re-add is idempotent: no error, still a single row.
 	if err := f.add(ctx, actor, "widget", "1"); err != nil {
 		t.Fatalf("re-add: %v", err)
+	}
+	if got := rec.reactionCount(); got != 1 {
+		t.Fatalf("recorder signals after re-add = %d, want 1", got)
 	}
 	if c, err := rt.Counts(ctx, "widget", "1"); err != nil || c.Favorites != 1 {
 		t.Fatalf("favorites count after re-add = %d err=%v, want 1 (idempotent)", c.Favorites, err)
@@ -71,6 +79,14 @@ func TestFavorites_AddRemoveStatusRecorder(t *testing.T) {
 	if k := favLastKind(rec); k != "unfavorite" {
 		t.Fatalf("recorder kind after remove = %q, want unfavorite", k)
 	}
+	if signals := rec.reactionSignals(); len(signals) != 2 || signals[1].Delta != 0 {
+		t.Fatalf("recorder signals after remove = %+v, want unfavorite delta 0", signals)
+	}
+	unfavoriteID := rec.reactionSignals()[1].EventID
+	assertValidEventID(t, unfavoriteID)
+	if favoriteID == unfavoriteID {
+		t.Fatalf("favorite and unfavorite event IDs are equal: %q", favoriteID)
+	}
 	if c, err := rt.Counts(ctx, "widget", "1"); err != nil || c.Favorites != 0 {
 		t.Fatalf("favorites count after remove = %d err=%v, want 0", c.Favorites, err)
 	}
@@ -78,6 +94,45 @@ func TestFavorites_AddRemoveStatusRecorder(t *testing.T) {
 	// remove again is idempotent (no row) -> no error.
 	if err := f.remove(ctx, actor, "widget", "1"); err != nil {
 		t.Fatalf("idempotent remove: %v", err)
+	}
+	if got := rec.reactionCount(); got != 2 {
+		t.Fatalf("recorder signals after repeated remove = %d, want 2", got)
+	}
+}
+
+func TestFavorites_RecorderObservesCommittedState(t *testing.T) {
+	res := &fakeResolver{}
+	res.set("widget", "1", true, true)
+	recorder := &committedStateRecorder{}
+	rt, pool := newTestRuntime(t, Options{Entities: res, EntityTypes: []string{"widget"}, Recorder: recorder})
+	recorder.pool = pool
+
+	if err := rt.favorites.add(context.Background(), Actor{ID: "u1", Kind: "user"}, "widget", "1"); err != nil {
+		t.Fatalf("favorite: %v", err)
+	}
+	recorder.assertVisible(t, 1)
+	assertValidEventID(t, recorder.reactionSignals()[0].EventID)
+	if err := rt.favorites.remove(context.Background(), Actor{ID: "u1", Kind: "user"}, "widget", "1"); err != nil {
+		t.Fatalf("unfavorite: %v", err)
+	}
+	recorder.assertVisible(t, 2)
+	assertValidEventID(t, recorder.reactionSignals()[1].EventID)
+}
+
+func TestFavorites_RecorderSkipsTransactionError(t *testing.T) {
+	res := &fakeResolver{}
+	res.set("widget", "1", true, true)
+	recorder := &recordingRecorder{}
+	rt, pool := newTestRuntime(t, Options{Entities: res, EntityTypes: []string{"widget"}, Recorder: recorder})
+	if _, err := pool.Exec(context.Background(), `DROP TABLE hostapp.social_entity_counts`); err != nil {
+		t.Fatalf("drop counts table: %v", err)
+	}
+
+	if err := rt.favorites.add(context.Background(), Actor{ID: "u1", Kind: "user"}, "widget", "1"); err == nil {
+		t.Fatal("favorite error = nil, want transaction failure")
+	}
+	if got := recorder.reactionCount(); got != 0 {
+		t.Fatalf("recorder signals = %d, want 0 after rollback", got)
 	}
 }
 
