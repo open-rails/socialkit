@@ -37,7 +37,8 @@ func TestReactions_TransitionsAndCounts(t *testing.T) {
 func TestReactions_ConcurrentDoubleLikeIsExact(t *testing.T) {
 	res := &fakeResolver{}
 	res.set("widget", "42", true, true)
-	rt, _ := newTestRuntime(t, Options{Entities: res, EntityTypes: []string{"widget"}})
+	recorder := &recordingRecorder{}
+	rt, _ := newTestRuntime(t, Options{Entities: res, EntityTypes: []string{"widget"}, Recorder: recorder})
 	actor := Actor{ID: "racer", Kind: "user"}
 
 	var wg sync.WaitGroup
@@ -58,6 +59,9 @@ func TestReactions_ConcurrentDoubleLikeIsExact(t *testing.T) {
 	}
 	// 20 concurrent identical likes from one actor => exactly one like.
 	assertCounts(t, rt, actor, "widget", "42", 1, 0, 1)
+	if got := recorder.reactionCount(); got != 1 {
+		t.Fatalf("recorder signals = %d, want exactly 1", got)
+	}
 }
 
 func TestReactions_GatingRejectsInaccessibleAndMissing(t *testing.T) {
@@ -178,6 +182,36 @@ func TestReactions_RecorderSkipsNoOp(t *testing.T) {
 	}
 	if got := rec.reactionCount(); got != 0 {
 		t.Fatalf("recorder signals = %d, want 0", got)
+	}
+}
+
+func TestReactions_RecorderObservesCommittedState(t *testing.T) {
+	res := &fakeResolver{}
+	res.set("widget", "1", true, true)
+	recorder := &committedStateRecorder{}
+	rt, pool := newTestRuntime(t, Options{Entities: res, EntityTypes: []string{"widget"}, Recorder: recorder})
+	recorder.pool = pool
+
+	if err := reactErr(rt.reactions.react(context.Background(), Actor{ID: "u1"}, "widget", "1", 1)); err != nil {
+		t.Fatalf("react: %v", err)
+	}
+	recorder.assertVisible(t, 1)
+}
+
+func TestReactions_RecorderSkipsTransactionError(t *testing.T) {
+	res := &fakeResolver{}
+	res.set("widget", "1", true, true)
+	recorder := &recordingRecorder{}
+	rt, pool := newTestRuntime(t, Options{Entities: res, EntityTypes: []string{"widget"}, Recorder: recorder})
+	if _, err := pool.Exec(context.Background(), `DROP TABLE hostapp.social_entity_counts`); err != nil {
+		t.Fatalf("drop counts table: %v", err)
+	}
+
+	if err := reactErr(rt.reactions.react(context.Background(), Actor{ID: "u1"}, "widget", "1", 1)); err == nil {
+		t.Fatal("react error = nil, want transaction failure")
+	}
+	if got := recorder.reactionCount(); got != 0 {
+		t.Fatalf("recorder signals = %d, want 0 after rollback", got)
 	}
 }
 

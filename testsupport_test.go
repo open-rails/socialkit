@@ -176,6 +176,66 @@ type recordingRecorder struct {
 	posts     []PostSignal
 }
 
+type committedStateRecorder struct {
+	mu      sync.Mutex
+	pool    *pgxpool.Pool
+	signals []ReactionSignal
+	errs    []error
+}
+
+func (r *committedStateRecorder) Reaction(ctx context.Context, signal ReactionSignal) {
+	var err error
+	switch signal.Kind {
+	case "favorite":
+		var exists bool
+		err = r.pool.QueryRow(ctx, `SELECT EXISTS (
+			SELECT 1 FROM hostapp.social_favorites
+			WHERE user_id = $1 AND entity_type = $2 AND entity_id = $3
+		)`, signal.ActorID, signal.EntityType, signal.EntityID).Scan(&exists)
+		if err == nil && !exists {
+			err = fmt.Errorf("favorite row is not visible")
+		}
+	default:
+		var value int16
+		err = r.pool.QueryRow(ctx, `SELECT value FROM hostapp.social_reactions
+			WHERE user_id = $1 AND entity_type = $2 AND entity_id = $3`,
+			signal.ActorID, signal.EntityType, signal.EntityID).Scan(&value)
+		if err == nil {
+			expected := int16(0)
+			switch signal.Kind {
+			case "like":
+				expected = 1
+			case "dislike":
+				expected = -1
+			}
+			if value != expected {
+				err = fmt.Errorf("reaction value = %d, want %d", value, expected)
+			}
+		}
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.signals = append(r.signals, signal)
+	if err != nil {
+		r.errs = append(r.errs, err)
+	}
+}
+
+func (*committedStateRecorder) Post(context.Context, PostSignal) {}
+
+func (r *committedStateRecorder) assertVisible(t *testing.T, wantSignals int) {
+	t.Helper()
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if len(r.signals) != wantSignals {
+		t.Fatalf("recorder signals = %d, want %d", len(r.signals), wantSignals)
+	}
+	if len(r.errs) != 0 {
+		t.Fatalf("recorder could not observe committed state: %v", r.errs)
+	}
+}
+
 func (r *recordingRecorder) Reaction(_ context.Context, s ReactionSignal) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

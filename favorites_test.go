@@ -93,6 +93,36 @@ func TestFavorites_AddRemoveStatusRecorder(t *testing.T) {
 	}
 }
 
+func TestFavorites_RecorderObservesCommittedState(t *testing.T) {
+	res := &fakeResolver{}
+	res.set("widget", "1", true, true)
+	recorder := &committedStateRecorder{}
+	rt, pool := newTestRuntime(t, Options{Entities: res, EntityTypes: []string{"widget"}, Recorder: recorder})
+	recorder.pool = pool
+
+	if err := rt.favorites.add(context.Background(), Actor{ID: "u1", Kind: "user"}, "widget", "1"); err != nil {
+		t.Fatalf("favorite: %v", err)
+	}
+	recorder.assertVisible(t, 1)
+}
+
+func TestFavorites_RecorderSkipsTransactionError(t *testing.T) {
+	res := &fakeResolver{}
+	res.set("widget", "1", true, true)
+	recorder := &recordingRecorder{}
+	rt, pool := newTestRuntime(t, Options{Entities: res, EntityTypes: []string{"widget"}, Recorder: recorder})
+	if _, err := pool.Exec(context.Background(), `DROP TABLE hostapp.social_entity_counts`); err != nil {
+		t.Fatalf("drop counts table: %v", err)
+	}
+
+	if err := rt.favorites.add(context.Background(), Actor{ID: "u1", Kind: "user"}, "widget", "1"); err == nil {
+		t.Fatal("favorite error = nil, want transaction failure")
+	}
+	if got := recorder.reactionCount(); got != 0 {
+		t.Fatalf("recorder signals = %d, want 0 after rollback", got)
+	}
+}
+
 func TestFavorites_BatchIsFavorited(t *testing.T) {
 	res := &fakeResolver{}
 	for _, id := range []string{"1", "2", "3"} {
