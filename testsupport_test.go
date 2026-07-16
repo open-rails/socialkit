@@ -237,6 +237,12 @@ func (r *committedStateRecorder) assertVisible(t *testing.T, wantSignals int) {
 	}
 }
 
+func (r *committedStateRecorder) reactionSignals() []ReactionSignal {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]ReactionSignal(nil), r.signals...)
+}
+
 func (r *recordingRecorder) Reaction(_ context.Context, s ReactionSignal) {
 	r.mu.Lock()
 	defer r.mu.Unlock()

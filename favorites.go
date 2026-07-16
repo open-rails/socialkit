@@ -4,6 +4,8 @@ import (
 	"context"
 	"net/http"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 // favorites is the user-only bookmark (wishlist): an unsigned presence over the
@@ -64,7 +66,7 @@ func (f *favorites) add(ctx context.Context, actor Actor, entityType, entityID s
 	}
 	if changed {
 		f.rt.rec.Reaction(ctx, ReactionSignal{
-			EntityType: entityType, EntityID: entityID, ActorID: actor.ID, Kind: "favorite", Delta: 0,
+			EntityType: entityType, EntityID: entityID, ActorID: actor.ID, EventID: uuid.NewString(), Kind: "favorite", Delta: 0,
 		})
 	}
 	return nil
@@ -99,7 +101,7 @@ func (f *favorites) remove(ctx context.Context, actor Actor, entityType, entityI
 	}
 	if changed {
 		f.rt.rec.Reaction(ctx, ReactionSignal{
-			EntityType: entityType, EntityID: entityID, ActorID: actor.ID, Kind: "unfavorite", Delta: 0,
+			EntityType: entityType, EntityID: entityID, ActorID: actor.ID, EventID: uuid.NewString(), Kind: "unfavorite", Delta: 0,
 		})
 	}
 	return nil

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -143,7 +144,7 @@ func (r *reactions) react(ctx context.Context, actor Actor, entityType, entityID
 	}
 	r.rt.rec.Reaction(ctx, ReactionSignal{
 		EntityType: ref.Type, EntityID: ref.ID, ActorID: actor.ID, Kind: reactionKind(value),
-		Delta: int16(dLikes - dDislikes),
+		EventID: uuid.NewString(), Delta: int16(dLikes - dDislikes),
 	})
 	return ref, nil
 }

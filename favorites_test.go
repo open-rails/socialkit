@@ -52,6 +52,8 @@ func TestFavorites_AddRemoveStatusRecorder(t *testing.T) {
 	if got := rec.reactionSignals()[0].Delta; got != 0 {
 		t.Fatalf("favorite delta = %d, want 0", got)
 	}
+	favoriteID := rec.reactionSignals()[0].EventID
+	assertValidEventID(t, favoriteID)
 	if c, err := rt.Counts(ctx, "widget", "1"); err != nil || c.Favorites != 1 {
 		t.Fatalf("favorites count after add = %d err=%v, want 1", c.Favorites, err)
 	}
@@ -80,6 +82,11 @@ func TestFavorites_AddRemoveStatusRecorder(t *testing.T) {
 	if signals := rec.reactionSignals(); len(signals) != 2 || signals[1].Delta != 0 {
 		t.Fatalf("recorder signals after remove = %+v, want unfavorite delta 0", signals)
 	}
+	unfavoriteID := rec.reactionSignals()[1].EventID
+	assertValidEventID(t, unfavoriteID)
+	if favoriteID == unfavoriteID {
+		t.Fatalf("favorite and unfavorite event IDs are equal: %q", favoriteID)
+	}
 	if c, err := rt.Counts(ctx, "widget", "1"); err != nil || c.Favorites != 0 {
 		t.Fatalf("favorites count after remove = %d err=%v, want 0", c.Favorites, err)
 	}
@@ -104,10 +111,12 @@ func TestFavorites_RecorderObservesCommittedState(t *testing.T) {
 		t.Fatalf("favorite: %v", err)
 	}
 	recorder.assertVisible(t, 1)
+	assertValidEventID(t, recorder.reactionSignals()[0].EventID)
 	if err := rt.favorites.remove(context.Background(), Actor{ID: "u1", Kind: "user"}, "widget", "1"); err != nil {
 		t.Fatalf("unfavorite: %v", err)
 	}
 	recorder.assertVisible(t, 2)
+	assertValidEventID(t, recorder.reactionSignals()[1].EventID)
 }
 
 func TestFavorites_RecorderSkipsTransactionError(t *testing.T) {
