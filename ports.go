@@ -104,6 +104,7 @@ type ReactionSignal struct {
 	EntityID   string
 	ActorID    string
 	Kind       string // "like" | "dislike" | "neutral" | "favorite" | "unfavorite"
+	Delta      int16  // authoritative signed reaction change; zero for favorites
 }
 
 // PostSignal indexes a post write for discovery (searchkit owns grouping/ranking).

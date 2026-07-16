@@ -114,6 +114,71 @@ func TestReactions_RecorderSignalEmitted(t *testing.T) {
 	if rec.reactionCount() != 1 {
 		t.Fatalf("recorder signals = %d, want 1", rec.reactionCount())
 	}
+	if got := rec.reactionSignals()[0]; got.Kind != "like" || got.Delta != 1 {
+		t.Fatalf("recorder signal = %+v, want like delta +1", got)
+	}
+}
+
+func TestReactions_RecorderTransitionDeltas(t *testing.T) {
+	tests := []struct {
+		name      string
+		previous  int16
+		next      int16
+		wantKind  string
+		wantDelta int16
+	}{
+		{name: "neutral to like", previous: 0, next: 1, wantKind: "like", wantDelta: 1},
+		{name: "like to neutral", previous: 1, next: 0, wantKind: "neutral", wantDelta: -1},
+		{name: "neutral to dislike", previous: 0, next: -1, wantKind: "dislike", wantDelta: -1},
+		{name: "dislike to neutral", previous: -1, next: 0, wantKind: "neutral", wantDelta: 1},
+		{name: "like to dislike", previous: 1, next: -1, wantKind: "dislike", wantDelta: -2},
+		{name: "dislike to like", previous: -1, next: 1, wantKind: "like", wantDelta: 2},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			res := &fakeResolver{}
+			res.set("widget", "1", true, true)
+			rec := &recordingRecorder{}
+			rt, _ := newTestRuntime(t, Options{Entities: res, EntityTypes: []string{"widget"}, Recorder: rec})
+			actor := Actor{ID: "u1", Kind: "user"}
+
+			if err := reactErr(rt.reactions.react(context.Background(), actor, "widget", "1", tt.previous)); err != nil {
+				t.Fatalf("set previous reaction: %v", err)
+			}
+			rec.resetReactions()
+			if err := reactErr(rt.reactions.react(context.Background(), actor, "widget", "1", tt.next)); err != nil {
+				t.Fatalf("transition reaction: %v", err)
+			}
+
+			signals := rec.reactionSignals()
+			if len(signals) != 1 {
+				t.Fatalf("recorder signals = %d, want 1", len(signals))
+			}
+			if signals[0].Kind != tt.wantKind || signals[0].Delta != tt.wantDelta {
+				t.Fatalf("recorder signal = %+v, want kind=%q delta=%d", signals[0], tt.wantKind, tt.wantDelta)
+			}
+		})
+	}
+}
+
+func TestReactions_RecorderSkipsNoOp(t *testing.T) {
+	res := &fakeResolver{}
+	res.set("widget", "1", true, true)
+	rec := &recordingRecorder{}
+	rt, _ := newTestRuntime(t, Options{Entities: res, EntityTypes: []string{"widget"}, Recorder: rec})
+	actor := Actor{ID: "u1", Kind: "user"}
+
+	if err := reactErr(rt.reactions.react(context.Background(), actor, "widget", "1", 1)); err != nil {
+		t.Fatalf("initial reaction: %v", err)
+	}
+	rec.resetReactions()
+	if err := reactErr(rt.reactions.react(context.Background(), actor, "widget", "1", 1)); err != nil {
+		t.Fatalf("repeated reaction: %v", err)
+	}
+	if got := rec.reactionCount(); got != 0 {
+		t.Fatalf("recorder signals = %d, want 0", got)
+	}
 }
 
 func TestReactions_HTTPRoute(t *testing.T) {

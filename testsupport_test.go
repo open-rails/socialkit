@@ -194,5 +194,17 @@ func (r *recordingRecorder) reactionCount() int {
 	return len(r.reactions)
 }
 
+func (r *recordingRecorder) reactionSignals() []ReactionSignal {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]ReactionSignal(nil), r.reactions...)
+}
+
+func (r *recordingRecorder) resetReactions() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.reactions = nil
+}
+
 // reactErr adapts react's (ref, error) return for error-only test assertions.
 func reactErr(_ EntityRef, err error) error { return err }

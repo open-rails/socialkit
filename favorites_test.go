@@ -49,6 +49,9 @@ func TestFavorites_AddRemoveStatusRecorder(t *testing.T) {
 	if k := favLastKind(rec); k != "favorite" {
 		t.Fatalf("recorder kind after add = %q, want favorite", k)
 	}
+	if got := rec.reactionSignals()[0].Delta; got != 0 {
+		t.Fatalf("favorite delta = %d, want 0", got)
+	}
 	if c, err := rt.Counts(ctx, "widget", "1"); err != nil || c.Favorites != 1 {
 		t.Fatalf("favorites count after add = %d err=%v, want 1", c.Favorites, err)
 	}
@@ -56,6 +59,9 @@ func TestFavorites_AddRemoveStatusRecorder(t *testing.T) {
 	// re-add is idempotent: no error, still a single row.
 	if err := f.add(ctx, actor, "widget", "1"); err != nil {
 		t.Fatalf("re-add: %v", err)
+	}
+	if got := rec.reactionCount(); got != 1 {
+		t.Fatalf("recorder signals after re-add = %d, want 1", got)
 	}
 	if c, err := rt.Counts(ctx, "widget", "1"); err != nil || c.Favorites != 1 {
 		t.Fatalf("favorites count after re-add = %d err=%v, want 1 (idempotent)", c.Favorites, err)
@@ -71,6 +77,9 @@ func TestFavorites_AddRemoveStatusRecorder(t *testing.T) {
 	if k := favLastKind(rec); k != "unfavorite" {
 		t.Fatalf("recorder kind after remove = %q, want unfavorite", k)
 	}
+	if signals := rec.reactionSignals(); len(signals) != 2 || signals[1].Delta != 0 {
+		t.Fatalf("recorder signals after remove = %+v, want unfavorite delta 0", signals)
+	}
 	if c, err := rt.Counts(ctx, "widget", "1"); err != nil || c.Favorites != 0 {
 		t.Fatalf("favorites count after remove = %d err=%v, want 0", c.Favorites, err)
 	}
@@ -78,6 +87,9 @@ func TestFavorites_AddRemoveStatusRecorder(t *testing.T) {
 	// remove again is idempotent (no row) -> no error.
 	if err := f.remove(ctx, actor, "widget", "1"); err != nil {
 		t.Fatalf("idempotent remove: %v", err)
+	}
+	if got := rec.reactionCount(); got != 2 {
+		t.Fatalf("recorder signals after repeated remove = %d, want 2", got)
 	}
 }
 

@@ -131,14 +131,19 @@ func (r *reactions) react(ctx context.Context, actor Actor, entityType, entityID
 		return EntityRef{}, err
 	}
 	defer tx.Rollback(ctx)
-	if _, _, err := r.applyTx(ctx, tx, actor, ref.Type, ref.ID, value); err != nil {
+	dLikes, dDislikes, err := r.applyTx(ctx, tx, actor, ref.Type, ref.ID, value)
+	if err != nil {
 		return EntityRef{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return EntityRef{}, err
 	}
+	if dLikes == 0 && dDislikes == 0 {
+		return ref, nil
+	}
 	r.rt.rec.Reaction(ctx, ReactionSignal{
 		EntityType: ref.Type, EntityID: ref.ID, ActorID: actor.ID, Kind: reactionKind(value),
+		Delta: int16(dLikes - dDislikes),
 	})
 	return ref, nil
 }
