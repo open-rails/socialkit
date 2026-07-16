@@ -104,6 +104,10 @@ func TestFavorites_RecorderObservesCommittedState(t *testing.T) {
 		t.Fatalf("favorite: %v", err)
 	}
 	recorder.assertVisible(t, 1)
+	if err := rt.favorites.remove(context.Background(), Actor{ID: "u1", Kind: "user"}, "widget", "1"); err != nil {
+		t.Fatalf("unfavorite: %v", err)
+	}
+	recorder.assertVisible(t, 2)
 }
 
 func TestFavorites_RecorderSkipsTransactionError(t *testing.T) {

@@ -186,14 +186,15 @@ type committedStateRecorder struct {
 func (r *committedStateRecorder) Reaction(ctx context.Context, signal ReactionSignal) {
 	var err error
 	switch signal.Kind {
-	case "favorite":
+	case "favorite", "unfavorite":
 		var exists bool
 		err = r.pool.QueryRow(ctx, `SELECT EXISTS (
 			SELECT 1 FROM hostapp.social_favorites
 			WHERE user_id = $1 AND entity_type = $2 AND entity_id = $3
 		)`, signal.ActorID, signal.EntityType, signal.EntityID).Scan(&exists)
-		if err == nil && !exists {
-			err = fmt.Errorf("favorite row is not visible")
+		wantExists := signal.Kind == "favorite"
+		if err == nil && exists != wantExists {
+			err = fmt.Errorf("favorite row existence = %t, want %t", exists, wantExists)
 		}
 	default:
 		var value int16
